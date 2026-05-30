@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Terraform
+.terraform/
+terraform.tfstate.backup
+*.tfvars
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local data
+data/
+*.db

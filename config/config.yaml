@@ -45,22 +45,22 @@ cron:
   jobs:
     - name: follow_up_scheduler
       schedule: "0 9 * * *"
-      command: "python /opt/hermes-agent/skills/follow_up_scheduler.py"
+      command: "python -m skills.follow_up_scheduler"
     
     - name: pattern_extractor
       schedule: "0 10 * * 1"
-      command: "python /opt/hermes-agent/skills/pattern_extractor.py"
+      command: "python -m skills.pattern_extractor"
     
     - name: market_research
       schedule: "0 11 * * 1"
-      command: "python /opt/hermes-agent/skills/market_research.py"
+      command: "python -m skills.market_research"
     
     - name: git_sync
       schedule: "0 2 * * *"
-      command: "bash /opt/hermes-agent/scripts/git-sync.sh"
+      command: "bash /app/scripts/git-sync.sh"
 
 # Custom tool paths
 skills:
   paths:
-    - /opt/hermes-agent/skills
-    - /opt/hermes-agent/active-skills
+    - /app/skills
+    - /app/active-skills

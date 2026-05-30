@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 dependencies = [
-    "hermes-agent>=0.1.0",
     "requests>=2.31.0",
     "pyyaml>=6.0.1",
+    "croniter>=2.0.0",
     # Azure
     "azure-identity>=1.15.0",
 ]
@@ -45,6 +45,9 @@ dev = [
 
 [project.scripts]
 outreach = "skills.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["skills"]
 
 [tool.ruff]
 target-version = "py311"

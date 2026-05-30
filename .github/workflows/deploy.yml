@@ -1,0 +1,94 @@
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches: [ main ]
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+        log-public-key: false
+
+    - name: Add VM to known hosts
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.VM_HOST }} ${{ secrets.VM_HOST_KEY }}" >> ~/.ssh/known_hosts
+
+    - name: Deploy to Azure VM
+      env:
+        VM_USER: ${{ secrets.VM_USER }}
+        VM_HOST: ${{ secrets.VM_HOST }}
+      run: |
+        echo "=== Deploying to $VM_HOST ==="
+        
+        # Sync code to VM
+        rsync -avz --delete \
+          --exclude '.git' \
+          --exclude '.github' \
+          --exclude '__pycache__' \
+          --exclude '*.pyc' \
+          --exclude '.pytest_cache' \
+          --exclude '.mypy_cache' \
+          --exclude '.ruff_cache' \
+          -e "ssh -o StrictHostKeyChecking=yes" \
+          ./ "$VM_USER@$VM_HOST:/opt/hermes-agent/repo/"
+        
+        # Run deployment script on VM
+        ssh -o StrictHostKeyChecking=yes "$VM_USER@$VM_HOST" \
+          "sudo bash /opt/hermes-agent/repo/scripts/deploy.sh"
+        
+        echo "=== Deploy Complete ==="
+
+    - name: Verify deployment
+      env:
+        VM_USER: ${{ secrets.VM_USER }}
+        VM_HOST: ${{ secrets.VM_HOST }}
+      run: |
+        ssh -o StrictHostKeyChecking=yes "$VM_USER@$VM_HOST" \
+          "sudo systemctl is-active hermes-gateway"
+        echo "Hermes gateway is running"
+
+    - name: Notify on failure
+      if: failure()
+      uses: slackapi/slack-github-action@v1.25.0
+      with:
+        payload: |
+          {
+            "text": "🚨 Deployment failed for outreach agent",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Deployment Failed*\nCommit: ${{ github.sha }}\nBranch: ${{ github.ref }}\nActor: ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                }
+              }
+            ]
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

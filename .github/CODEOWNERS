@@ -1,0 +1,15 @@
+# Global owners
+* @samkitshah1262
+
+# Skills require review
+/skills/ @samkitshah1262
+
+# Config files require review
+/config/ @samkitshah1262
+
+# Deployment scripts require review
+/scripts/ @samkitshah1262
+/systemd/ @samkitshah1262
+
+# Schema changes require review
+/sql/ @samkitshah1262

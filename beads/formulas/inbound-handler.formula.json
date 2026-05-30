@@ -1,0 +1,70 @@
+{
+  "name": "inbound-handler",
+  "description": "Process any inbound message from a lead: classify → load context → draft response → check guardrails → send or queue",
+  "version": "1.0.0",
+  "steps": [
+    {
+      "step": 1,
+      "title": "Classify Intent",
+      "skill": "inbox_classifier",
+      "auto": true,
+      "output": "intent_classification",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 2,
+      "title": "Load Context",
+      "skill": "crm_toolkit",
+      "auto": true,
+      "output": "lead_context",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 3,
+      "title": "Draft Response",
+      "skill": "outreach_drafter",
+      "auto": true,
+      "input": ["intent_classification", "lead_context"],
+      "output": "draft_reply",
+      "timeout_seconds": 60
+    },
+    {
+      "step": 4,
+      "title": "Check Guardrails",
+      "skill": "guardrail_checker",
+      "auto": true,
+      "input": "draft_reply",
+      "output": "guardrail_result",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 5,
+      "title": "Auto-Reply Decision",
+      "skill": "inbox_classifier",
+      "auto": true,
+      "input": "intent_classification",
+      "output": "decision",
+      "timeout_seconds": 10
+    },
+    {
+      "step": 6,
+      "title": "Send or Queue",
+      "skill": "send_or_queue",
+      "auto": true,
+      "condition": "decision.action == 'auto_reply' AND guardrail_result.safe == true",
+      "timeout_seconds": 60
+    },
+    {
+      "step": 7,
+      "title": "Log Interaction",
+      "skill": "crm_toolkit",
+      "auto": true,
+      "timeout_seconds": 30
+    }
+  ],
+  "on_failure": "human_review",
+  "retry_policy": {
+    "max_retries": 1,
+    "backoff_seconds": 30
+  }
+}

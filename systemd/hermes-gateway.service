@@ -1,0 +1,31 @@
+[Unit]
+Description=PS3Labs Hermes Agent Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-agent
+Environment="HOME=/home/hermes"
+Environment="HERMES_HOME=/opt/hermes-agent/.hermes"
+Environment="PATH=/home/hermes/hermes-venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="VIRTUAL_ENV=/home/hermes/hermes-venv"
+Environment="BEADS_DIR=/opt/hermes-agent/.beads"
+EnvironmentFile=/opt/hermes-agent/.hermes/.env
+
+ExecStart=/home/hermes/hermes-venv/bin/hermes gateway
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/hermes-agent/logs/gateway.log
+StandardError=append:/opt/hermes-agent/logs/gateway-error.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hermes-agent
+
+[Install]
+WantedBy=multi-user.target

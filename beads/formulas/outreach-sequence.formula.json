@@ -1,0 +1,81 @@
+{
+  "name": "outreach-sequence",
+  "description": "Full lifecycle of a single outreach attempt: enrich → score → draft → approve → send → log → schedule follow-up",
+  "version": "1.0.0",
+  "steps": [
+    {
+      "step": 1,
+      "title": "Enrich Lead",
+      "skill": "lead_enricher",
+      "auto": true,
+      "output": "enriched_lead",
+      "timeout_seconds": 120
+    },
+    {
+      "step": 2,
+      "title": "Score Fit",
+      "skill": "crm_toolkit",
+      "auto": true,
+      "input": "enriched_lead",
+      "output": "lead_score",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 3,
+      "title": "Draft Outreach",
+      "skill": "outreach_drafter",
+      "auto": true,
+      "input": "enriched_lead",
+      "output": "draft_message",
+      "timeout_seconds": 60
+    },
+    {
+      "step": 4,
+      "title": "Apply Evolution Rules",
+      "skill": "evolution_engine",
+      "auto": true,
+      "input": "draft_message",
+      "output": "optimized_draft",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 5,
+      "title": "Human Approval Gate",
+      "gate": "human_approve",
+      "auto": false,
+      "condition": "lead.priority >= 2 OR message.is_cold_outbound",
+      "input": "optimized_draft",
+      "notification_channel": "discord",
+      "timeout_seconds": 86400
+    },
+    {
+      "step": 6,
+      "title": "Send Message",
+      "skill": "send_message",
+      "auto": true,
+      "input": "approved_draft",
+      "timeout_seconds": 60
+    },
+    {
+      "step": 7,
+      "title": "Log to CRM",
+      "skill": "crm_toolkit",
+      "auto": true,
+      "output": "crm_log_entry",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 8,
+      "title": "Schedule Follow-up",
+      "skill": "follow_up_scheduler",
+      "auto": true,
+      "delay": "7d",
+      "timeout_seconds": 30
+    }
+  ],
+  "on_failure": "queue_for_human_review",
+  "retry_policy": {
+    "max_retries": 2,
+    "backoff_seconds": 60
+  }
+}

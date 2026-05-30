@@ -1,0 +1,66 @@
+model:
+  provider: azure-foundry
+  # Replace with your actual Azure AI Foundry endpoint:
+  base_url: https://<your-resource>.openai.azure.com/openai/v1
+  api_mode: chat_completions
+  auth_mode: entra_id
+  default: kimi-k2-6
+  context_length: 200000
+  entra:
+    scope: https://ai.azure.com/.default
+
+gateway:
+  platforms:
+    email:
+      poll_interval: 15
+      allowed_users:
+        - "${FOUNDER_EMAIL}"
+      home_address: "${FOUNDER_EMAIL}"
+    
+    whatsapp:
+      mode: bot
+      allowed_users: "*"
+      unauthorized_dm_behavior: ignore
+      reply_prefix: ""
+    
+    discord:
+      token_env: DISCORD_BOT_TOKEN
+      allowed_users:
+        - "${FOUNDER_DISCORD_ID}"
+      dm_only: true
+
+display:
+  tool_progress: new
+  busy_ack_enabled: true
+  busy_ack_detail: false
+  platforms:
+    telegram:
+      tool_progress: off
+      busy_ack_detail: false
+    discord:
+      tool_progress: all
+      busy_ack_detail: true
+
+cron:
+  jobs:
+    - name: follow_up_scheduler
+      schedule: "0 9 * * *"
+      command: "python /opt/hermes-agent/skills/follow_up_scheduler.py"
+    
+    - name: pattern_extractor
+      schedule: "0 10 * * 1"
+      command: "python /opt/hermes-agent/skills/pattern_extractor.py"
+    
+    - name: market_research
+      schedule: "0 11 * * 1"
+      command: "python /opt/hermes-agent/skills/market_research.py"
+    
+    - name: git_sync
+      schedule: "0 2 * * *"
+      command: "bash /opt/hermes-agent/scripts/git-sync.sh"
+
+# Custom tool paths
+skills:
+  paths:
+    - /opt/hermes-agent/skills
+    - /opt/hermes-agent/active-skills

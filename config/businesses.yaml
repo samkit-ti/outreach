@@ -1,0 +1,50 @@
+# Multi-Business Manifest
+# The agent can serve multiple ventures. Each business gets its own repo.
+
+businesses:
+  - name: ps3_labs_ai
+    display_name: "PS3 Labs AI"
+    repo_url: "https://github.com/samkit-shah/ps3_labs_ai.git"
+    local_path: "/opt/business/ps3_labs_ai"
+    enabled: true
+    
+    # Business-specific configuration
+    industry_focus:
+      - healthcare
+      - education
+    
+    pricing:
+      starter_inr: 15000
+      professional_inr: 45000
+      enterprise_inr: 150000
+    
+    # Persona overrides for this business
+    personas:
+      sales:
+        tone: "professional_warm"
+        value_props:
+          - "Reduce admin burden by 60%"
+          - "24/7 patient support"
+          - "DPDP compliant"
+      marketing:
+        channels:
+          - linkedin
+          - email
+          - whatsapp
+      
+    # Lead sources specific to this business
+    lead_sources:
+      - file: "ahmedabad_b2b_leads.json"
+        format: "json"
+        import_on_init: true
+
+  # Template for future businesses (uncomment and fill to add)
+  # - name: future_venture
+  #   display_name: "Future Venture"
+  #   repo_url: "https://github.com/samkit-shah/future_venture.git"
+  #   local_path: "/opt/business/future_venture"
+  #   enabled: false
+  #   industry_focus: []
+  #   pricing: {}
+  #   personas: {}
+  #   lead_sources: []

@@ -1,0 +1,63 @@
+{
+  "name": "weekly-evolution",
+  "description": "Analyze weekly interactions, extract patterns, propose new behavior rules, and apply after founder review",
+  "version": "1.0.0",
+  "steps": [
+    {
+      "step": 1,
+      "title": "Fetch Interactions",
+      "skill": "crm_toolkit",
+      "auto": true,
+      "output": "interaction_batch",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 2,
+      "title": "Analyze Patterns",
+      "skill": "pattern_extractor",
+      "auto": true,
+      "input": "interaction_batch",
+      "output": "patterns",
+      "timeout_seconds": 120
+    },
+    {
+      "step": 3,
+      "title": "Draft New Rules",
+      "skill": "evolution_engine",
+      "auto": true,
+      "input": "patterns",
+      "output": "proposed_rules",
+      "timeout_seconds": 60
+    },
+    {
+      "step": 4,
+      "title": "Human Review Rules",
+      "gate": "human_approve",
+      "auto": false,
+      "input": "proposed_rules",
+      "notification_channel": "discord",
+      "timeout_seconds": 172800
+    },
+    {
+      "step": 5,
+      "title": "Apply Rules",
+      "skill": "evolution_engine",
+      "auto": true,
+      "input": "approved_rules",
+      "timeout_seconds": 30
+    },
+    {
+      "step": 6,
+      "title": "Report to Founder",
+      "skill": "report_writer",
+      "auto": true,
+      "output": "weekly_report",
+      "timeout_seconds": 60
+    }
+  ],
+  "on_failure": "log_and_notify",
+  "retry_policy": {
+    "max_retries": 1,
+    "backoff_seconds": 300
+  }
+}

@@ -9,25 +9,31 @@ RUN apt-get update && apt-get install -y \
     bash \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
-COPY pyproject.toml README.md ./
-COPY skills/ ./skills/
-COPY config/ ./config/
-COPY scripts/ ./scripts/
-COPY sql/ ./sql/
+# Install hermes-agent from source (this has cron, gateway, skills hub built-in)
+# Using a specific ref for reproducibility; update to latest release as needed
+RUN pip install --no-cache-dir \
+    "git+https://github.com/NousResearch/hermes-agent.git#egg=hermes-agent" \
+    "python-dotenv>=1.2.0" \
+    "requests>=2.31.0" \
+    "pyyaml>=6.0.1"
 
-# Install the package and dependencies
-RUN pip install --no-cache-dir -e "."
+# Set up Hermes home directory (profiles, cron jobs, sessions live here)
+ENV HERMES_HOME=/app/data/.hermes
+ENV HERMES_DIR=/app/data
+ENV HOME=/app
 
-# Create directories for persistent data
-RUN mkdir -p /app/data /app/logs /app/active-skills
+# Create Hermes home structure
+RUN mkdir -p \
+    $HERMES_HOME/cron \
+    $HERMES_HOME/skills \
+    $HERMES_HOME/sessions \
+    $HERMES_HOME/logs \
+    /app/skills \
+    /app/data
 
-# Expose port if needed (for health checks)
-EXPOSE 8080
+# Copy our custom skills
+COPY skills/ /app/skills/
+COPY config/ /app/config/
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "print('healthy')" || exit 1
-
-# Run the agent (Hermes gateway mode)
-CMD ["python", "-m", "skills"]
+# Hermes gateway entrypoint
+CMD ["hermes", "gateway"]

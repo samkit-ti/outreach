@@ -162,6 +162,11 @@ resource "azurerm_container_app" "outreach" {
       }
 
       env {
+        name  = "HERMES_HOME"
+        value = "/app/data/.hermes"
+      }
+
+      env {
         name  = "HERMES_DIR"
         value = "/app/data"
       }

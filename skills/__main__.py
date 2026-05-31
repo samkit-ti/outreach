@@ -1,12 +1,13 @@
 """Entry point for the outreach agent container.
 
-Runs a lightweight cron scheduler based on config/config.yaml.
-No hermes framework dependency — skills are self-contained.
+Runs a lightweight cron scheduler. Loads secrets from /app/data/.env
+and substitutes environment variables in config.yaml.
 """
 
-import importlib
+import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -15,6 +16,23 @@ from pathlib import Path
 
 import yaml
 from croniter import croniter
+
+# Try to load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+
+    env_paths = [
+        Path("/app/data/.env"),
+        Path(os.environ.get("HERMES_DIR", ".")) / ".env",
+        Path(".env"),
+    ]
+    for p in env_paths:
+        if p.exists():
+            load_dotenv(p)
+            logging.getLogger(__name__).debug(f"Loaded .env from {p}")
+            break
+except ImportError:
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,8 +53,28 @@ SKILL_MAP = {
 }
 
 
+def _substitute_env_vars(obj):
+    """Recursively substitute ${VAR:-default} patterns in config values."""
+    if isinstance(obj, str):
+        pattern = re.compile(r"\$\{([^}]+)\}")
+
+        def replacer(match):
+            expr = match.group(1)
+            if ":-" in expr:
+                var, default = expr.split(":-", 1)
+                return os.environ.get(var, default)
+            return os.environ.get(expr, match.group(0))
+
+        return pattern.sub(replacer, obj)
+    if isinstance(obj, list):
+        return [_substitute_env_vars(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _substitute_env_vars(v) for k, v in obj.items()}
+    return obj
+
+
 def load_config() -> dict:
-    """Load agent configuration from YAML."""
+    """Load agent configuration from YAML with env var substitution."""
     paths = [
         Path("/app/config/config.yaml"),
         Path(os.environ.get("HERMES_DIR", ".")).parent / "config" / "config.yaml",
@@ -46,7 +84,8 @@ def load_config() -> dict:
         if p.exists():
             logger.info(f"Loading config from {p}")
             with open(p) as f:
-                return yaml.safe_load(f)
+                raw = yaml.safe_load(f)
+            return _substitute_env_vars(raw)
     logger.warning("No config.yaml found; using defaults")
     return {}
 
@@ -70,13 +109,12 @@ def run_subprocess(cmd: str) -> None:
         logger.info(f"Command succeeded: {cmd}")
 
 
-def run_skill_direct(name: str) -> None:
+def run_skill_direct(name: str) -> bool:
     """Try to run a skill's main run_* function directly via import."""
     module_name = SKILL_MAP.get(name)
     if not module_name:
         return False
 
-    # Guess the function name from the module name
     func_guesses = [
         f"run_daily_{name}",
         f"run_weekly_{name}",
@@ -85,7 +123,7 @@ def run_skill_direct(name: str) -> None:
     ]
 
     try:
-        module = importlib.import_module(module_name)
+        module = __import__(module_name, fromlist=[""])
         for func_name in func_guesses:
             if hasattr(module, func_name):
                 logger.info(f"Running {module_name}.{func_name}()")
@@ -105,11 +143,9 @@ def execute_job(job: dict) -> None:
 
     logger.info(f"Triggering job: {name}")
 
-    # Try direct skill invocation first (better logging, no subprocess overhead)
     if run_skill_direct(name):
         return
 
-    # Fall back to subprocess
     if cmd:
         run_subprocess(cmd)
     else:
@@ -135,25 +171,21 @@ def main() -> int:
     for job in jobs:
         logger.info(f"  - {job['name']}: {job['schedule']} -> {job.get('command', 'direct')}")
 
-    # Track last run times to avoid duplicate triggers
     last_runs: dict[str, float] = {}
     for job in jobs:
         last_runs[job["name"]] = time.time()
 
-    # Main loop — check every 30 seconds
     while True:
         now = time.time()
         for job in jobs:
             name = job["name"]
             schedule = job["schedule"]
 
-            # croniter with last_runs gives us the next scheduled time after last_runs
             nxt = croniter(schedule, last_runs[name]).get_next(float)
             if nxt <= now:
                 execute_job(job)
                 last_runs[name] = now
 
-        # Log a heartbeat every 5 minutes
         if int(now) % 300 < 30:
             logger.info("Scheduler heartbeat — all jobs registered")
 

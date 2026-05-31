@@ -1,21 +1,29 @@
+# Outreach Agent Configuration
+# Values wrapped in ${ENV_VAR} are substituted at runtime from environment variables
+# or from /app/data/.env (loaded by python-dotenv if available).
+
 model:
   provider: azure-foundry
-  # Replace with your actual Azure AI Foundry endpoint:
-  base_url: https://<your-resource>.openai.azure.com/openai/v1
+  # Azure AI Foundry endpoint — set AZURE_FOUNDRY_ENDPOINT env var
+  base_url: ${AZURE_FOUNDRY_ENDPOINT:-https://ps3labs.openai.azure.com/openai/v1}
   api_mode: chat_completions
   auth_mode: entra_id
-  default: kimi-k2-6
+  default: ${DEFAULT_MODEL:-kimi-k2-6}
   context_length: 200000
   entra:
     scope: https://ai.azure.com/.default
+
+# Alternative: use api_key mode instead of entra_id
+#   auth_mode: api_key
+#   api_key: ${AZURE_OPENAI_API_KEY}
 
 gateway:
   platforms:
     email:
       poll_interval: 15
       allowed_users:
-        - "${FOUNDER_EMAIL}"
-      home_address: "${FOUNDER_EMAIL}"
+        - "${FOUNDER_EMAIL:-samkit@ps3labs.ai}"
+      home_address: "${FOUNDER_EMAIL:-samkit@ps3labs.ai}"
     
     whatsapp:
       mode: bot

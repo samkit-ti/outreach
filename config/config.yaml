@@ -4,21 +4,28 @@
 
 model:
   provider: azure-foundry
-  # Azure AI Foundry endpoint — set AZURE_FOUNDRY_ENDPOINT env var
-  base_url: ${AZURE_FOUNDRY_ENDPOINT:-https://ps3labs.openai.azure.com/openai/v1}
+  # Azure AI Foundry endpoint — deployed gpt-4o model
+  base_url: ${AZURE_FOUNDRY_BASE_URL:-https://oai-agent-api.openai.azure.com/openai/deployments/gpt-4o}
   api_mode: chat_completions
-  auth_mode: entra_id
-  default: ${DEFAULT_MODEL:-kimi-k2-6}
-  context_length: 200000
-  entra:
-    scope: https://ai.azure.com/.default
+  auth_mode: api_key
+  default: ${DEFAULT_MODEL:-gpt-4o}
+  context_length: 128000
+  api_key: ${AZURE_FOUNDRY_API_KEY}
 
-# Alternative: use api_key mode instead of entra_id
-#   auth_mode: api_key
+# Alternative: use Azure OpenAI direct
+#   provider: openai
+#   base_url: ${AZURE_OPENAI_ENDPOINT}
 #   api_key: ${AZURE_OPENAI_API_KEY}
 
 gateway:
   platforms:
+    telegram:
+      token_env: TELEGRAM_BOT_TOKEN
+      allowed_users: "*"
+      unauthorized_dm_behavior: ignore
+      reply_to_mode: first
+      reply_prefix: ""
+      
     email:
       poll_interval: 15
       allowed_users:
@@ -51,15 +58,15 @@ display:
 
 cron:
   jobs:
-    - name: follow_up_scheduler
+    - name: daily_follow_up
       schedule: "0 9 * * *"
       command: "python -m skills.follow_up_scheduler"
     
-    - name: pattern_extractor
+    - name: weekly_pattern_analysis
       schedule: "0 10 * * 1"
       command: "python -m skills.pattern_extractor"
     
-    - name: market_research
+    - name: weekly_market_research
       schedule: "0 11 * * 1"
       command: "python -m skills.market_research"
     
@@ -72,3 +79,33 @@ skills:
   paths:
     - /app/skills
     - /app/active-skills
+
+# Web search configuration
+web:
+  backend: ${WEB_SEARCH_BACKEND:-duckduckgo}
+  search_backend: ${WEB_SEARCH_BACKEND:-duckduckgo}
+
+# Auxiliary models for specialized tasks
+auxiliary:
+  vision:
+    provider: azure-foundry
+    model: gpt-4o
+    base_url: ${AZURE_FOUNDRY_BASE_URL}
+    api_key: ${AZURE_FOUNDRY_API_KEY}
+  
+  web_extract:
+    provider: azure-foundry
+    model: gpt-4o
+    base_url: ${AZURE_FOUNDRY_BASE_URL}
+    api_key: ${AZURE_FOUNDRY_API_KEY}
+
+# Sessions configuration
+sessions:
+  auto_prune: true
+  retention_days: 90
+  min_interval_hours: 24
+  vacuum_after_prune: true
+
+# Security settings
+security:
+  redact_secrets: true

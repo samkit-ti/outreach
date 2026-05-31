@@ -31,6 +31,7 @@ ENV BACKUP_DIR=/app/backup
 COPY skills/ /app/skills/
 COPY config/ /app/config/
 COPY scripts/init-hermes.sh /app/scripts/init-hermes.sh
+COPY scripts/init-crm-db.py /app/scripts/init-crm-db.py
 RUN chmod +x /app/scripts/init-hermes.sh
 
 # Create Hermes home structure (EmptyDir mount point)

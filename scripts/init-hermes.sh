@@ -21,9 +21,19 @@ set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-/app/backup/.hermes}"
 HERMES_HOME="${HERMES_HOME:-/app/.hermes}"
+DATA_DIR="${HERMES_DIR:-/app/data}"
 
 log() {
     echo "[init-hermes] $*" >&2
+}
+
+# ---------------------------------------------------------------------------
+# INIT CRM DATABASE: Create tables if they don't exist
+# ---------------------------------------------------------------------------
+init_crm_database() {
+    log "Initializing CRM database ..."
+    python3 /app/scripts/init-crm-db.py
+    log "CRM database ready"
 }
 
 # ---------------------------------------------------------------------------
@@ -105,14 +115,19 @@ main() {
     log "=========================================="
     log "Hermes Container Init (EmptyDir edition)"
     log "HERMES_HOME=$HERMES_HOME"
+    log "DATA_DIR=$DATA_DIR"
     log "BACKUP_DIR=$BACKUP_DIR"
     log "=========================================="
+
+    # Initialize CRM database first
+    init_crm_database
 
     # On restart: EmptyDir retains data; on fresh replica: restore from backup
     restore_from_backup
 
     # Ensure directory structure exists
     mkdir -p "$HERMES_HOME"/{skills,active-skills,cron,logs}
+    mkdir -p "$DATA_DIR"
 
     # Start background periodic backup
     start_periodic_backup

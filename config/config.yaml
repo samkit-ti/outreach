@@ -4,11 +4,11 @@
 
 model:
   provider: azure-foundry
-  # Azure AI Foundry endpoint — deployed gpt-4o model
-  base_url: ${AZURE_FOUNDRY_BASE_URL:-https://oai-agent-api.openai.azure.com/openai/deployments/gpt-4o}
+  # Azure AI Foundry endpoint — Kimi K2.6 via opencode-agent-resource
+  base_url: ${AZURE_FOUNDRY_BASE_URL:-https://opencode-agent-resource.services.ai.azure.com/models}
   api_mode: chat_completions
   auth_mode: api_key
-  default: ${DEFAULT_MODEL:-gpt-4o}
+  default: ${DEFAULT_MODEL:-Kimi-K2.6}
   context_length: 128000
   api_key: ${AZURE_FOUNDRY_API_KEY}
 
@@ -89,13 +89,13 @@ web:
 auxiliary:
   vision:
     provider: azure-foundry
-    model: gpt-4o
+    model: Kimi-K2.6
     base_url: ${AZURE_FOUNDRY_BASE_URL}
     api_key: ${AZURE_FOUNDRY_API_KEY}
   
   web_extract:
     provider: azure-foundry
-    model: gpt-4o
+    model: Kimi-K2.6
     base_url: ${AZURE_FOUNDRY_BASE_URL}
     api_key: ${AZURE_FOUNDRY_API_KEY}
 

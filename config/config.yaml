@@ -1,6 +1,6 @@
 # Outreach Agent Configuration
 # Values wrapped in ${ENV_VAR} are substituted at runtime from environment variables
-# or from /app/data/.env (loaded by python-dotenv if available).
+# or from HERMES_HOME/.env (loaded by python-dotenv if available).
 
 model:
   provider: azure-foundry

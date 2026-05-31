@@ -3,7 +3,7 @@
 
 This script helps:
 1. Generate an Azure Service Principal for GitHub Actions OIDC
-2. Upload .env secrets to Azure Files (persistent storage)
+2. Upload .env secrets to Azure Files (backup storage for DR)
 3. Configure Container App secrets
 
 Usage:
@@ -190,7 +190,7 @@ def main() -> int:
         "--upload-env",
         type=Path,
         metavar="PATH",
-        help="Upload .env file to Azure Files persistent storage",
+        help="Upload .env file to Azure Files backup storage",
     )
     parser.add_argument(
         "--repo",

@@ -15,3 +15,8 @@ venv/
 # Local data
 data/
 *.db
+
+# Build artifacts
+tfplan
+terraform.tfstate
+

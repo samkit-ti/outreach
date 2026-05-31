@@ -145,12 +145,20 @@ resource "azurerm_container_app" "outreach" {
       cpu    = 0.5
       memory = "1Gi"
 
-      # Mount persistent storage at /app/persistent (NOT HERMES_HOME)
-      # SQLite databases don't work on Azure Files (SMB locking).
-      # Persistent data is synced by init-hermes.sh.
+      # Mount EmptyDir at HERMES_HOME so SQLite databases survive container
+      # restarts within the same replica. EmptyDir is local filesystem (no
+      # SMB locking issues) and persists across restart/crash, but is lost
+      # if the replica is replaced (node failure, scale-to-zero, etc.).
       volume_mounts {
-        name = "outreach-data"
-        path = "/app/persistent"
+        name = "hermes-home"
+        path = "/app/.hermes"
+      }
+
+      # Azure Files is used for disaster-recovery backup of config/skills/cron.
+      # NOT used for SQLite (SMB lacks POSIX advisory locking).
+      volume_mounts {
+        name = "outreach-backup"
+        path = "/app/backup"
       }
 
       env {
@@ -167,10 +175,20 @@ resource "azurerm_container_app" "outreach" {
         name  = "HERMES_DIR"
         value = "/app"
       }
+
+      env {
+        name  = "BACKUP_DIR"
+        value = "/app/backup"
+      }
     }
 
     volume {
-      name         = "outreach-data"
+      name         = "hermes-home"
+      storage_type = "EmptyDir"
+    }
+
+    volume {
+      name         = "outreach-backup"
       storage_type = "AzureFile"
       storage_name = azurerm_container_app_environment_storage.outreach.name
     }

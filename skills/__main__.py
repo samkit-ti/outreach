@@ -1,6 +1,6 @@
 """Entry point for the outreach agent container.
 
-Runs a lightweight cron scheduler. Loads secrets from /app/data/.env
+Runs a lightweight cron scheduler. Loads secrets from HERMES_HOME/.env
 and substitutes environment variables in config.yaml.
 """
 
@@ -22,7 +22,7 @@ try:
     from dotenv import load_dotenv
 
     env_paths = [
-        Path("/app/data/.env"),
+        Path(os.environ.get("HERMES_HOME", "/app/.hermes")) / ".env",
         Path(os.environ.get("HERMES_DIR", ".")) / ".env",
         Path(".env"),
     ]

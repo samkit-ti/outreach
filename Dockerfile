@@ -19,12 +19,13 @@ RUN pip install --no-cache-dir \
     "pyyaml>=6.0.1"
 
 # Set up Hermes home directory
-# IMPORTANT: HERMES_HOME stays on local ephemeral storage so SQLite works.
-# Persistent data (config, skills, cron) is synced via init-hermes.sh.
+# IMPORTANT: HERMES_HOME is mounted as EmptyDir so SQLite survives restarts.
+# Azure Files (mounted at /app/backup) is used for cross-replica config DR.
 ENV HERMES_HOME=/app/.hermes
 ENV HERMES_DIR=/app
 ENV HOME=/app
-ENV PERSISTENT_BACKUP_INTERVAL=300
+ENV BACKUP_INTERVAL=300
+ENV BACKUP_DIR=/app/backup
 
 # Copy our custom skills
 COPY skills/ /app/skills/
@@ -32,13 +33,13 @@ COPY config/ /app/config/
 COPY scripts/init-hermes.sh /app/scripts/init-hermes.sh
 RUN chmod +x /app/scripts/init-hermes.sh
 
-# Create Hermes home structure
+# Create Hermes home structure (EmptyDir mount point)
 RUN mkdir -p \
     $HERMES_HOME/cron \
     $HERMES_HOME/skills \
     $HERMES_HOME/active-skills \
     $HERMES_HOME/logs \
-    /app/persistent
+    /app/backup
 
 # Entrypoint: init script restores persistent data, then runs hermes gateway
 CMD ["/app/scripts/init-hermes.sh"]

@@ -2,65 +2,80 @@
 set -euo pipefail
 
 # =============================================================================
-# Hermes Container Init Script
+# Hermes Container Init Script (EmptyDir edition)
 # =============================================================================
-# Problem: SQLite databases don't work reliably on Azure Files (SMB) because
-#   of file locking issues.
-# Solution:
-#   - HERMES_HOME is on local ephemeral storage (/app/.hermes) for SQLite
-#   - Azure Files is mounted at /app/persistent for config backup
-#   - This script restores config on startup and backs up on shutdown
+# Architecture:
+#   - EmptyDir volume mounted at /app/.hermes (HERMES_HOME)
+#     -> SQLite databases survive container restarts / crashes
+#     -> Local filesystem: no SMB locking issues
+#     -> Lost ONLY when the replica is replaced (node failure, revision update)
+#   - Azure Files mounted at /app/backup
+#     -> Cross-replica disaster recovery for config/skills/cron
+#     -> NEVER used for SQLite files (SMB lacks POSIX advisory locking)
+#
+# Thread isolation:
+#   - Hermes_state uses session_id + user_id columns for conversation isolation
+#   - SQLite connection uses check_same_thread=False + Python threading.Lock()
+#   - Each outreach thread maps to a unique session_id, preventing leakage
 # =============================================================================
 
-PERSISTENT_DIR="/app/persistent/.hermes"
+BACKUP_DIR="${BACKUP_DIR:-/app/backup/.hermes}"
 HERMES_HOME="${HERMES_HOME:-/app/.hermes}"
 
 log() {
     echo "[init-hermes] $*" >&2
 }
 
-# -----------------------------------------------------------------------------
-# RESTORE: Copy persistent config into HERMES_HOME on startup
-# -----------------------------------------------------------------------------
-restore_from_persistent() {
-    if [[ ! -d "$PERSISTENT_DIR" ]]; then
-        log "No persistent data found at $PERSISTENT_DIR (first run or empty share)"
+# ---------------------------------------------------------------------------
+# is_emptydir_populated: check if HERMES_HOME already has data
+# ---------------------------------------------------------------------------
+is_emptydir_populated() {
+    # If sessions.db exists, this is a restart (EmptyDir survived)
+    [[ -f "$HERMES_HOME/sessions.db" ]]
+}
+
+# ---------------------------------------------------------------------------
+# RESTORE: Copy backup into HERMES_HOME only on fresh replica startup
+# ---------------------------------------------------------------------------
+restore_from_backup() {
+    if is_emptydir_populated; then
+        log "EmptyDir already has sessions.db — skipping restore (preserving thread continuity)"
         return
     fi
 
-    log "Restoring persistent data from $PERSISTENT_DIR ..."
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        log "No backup data found at $BACKUP_DIR (first run or empty share)"
+        return
+    fi
 
-    # Create HERMES_HOME dirs
+    log "Restoring backup from $BACKUP_DIR to $HERMES_HOME ..."
     mkdir -p "$HERMES_HOME"
 
-    # Copy non-DB files that are safe to persist on Azure Files
+    # Restore non-DB files that are safe on Azure Files
     for item in .env skills cron active-skills; do
-        src="$PERSISTENT_DIR/$item"
+        src="$BACKUP_DIR/$item"
         dst="$HERMES_HOME/$item"
         if [[ -e "$src" ]]; then
-            # Use rsync-like behavior: copy if newer or doesn't exist
-            if [[ ! -e "$dst" || "$src" -nt "$dst" ]]; then
-                rm -rf "$dst"
-                cp -r "$src" "$dst"
-                log "  Restored $item"
-            fi
+            rm -rf "$dst"
+            cp -r "$src" "$dst"
+            log "  Restored $item"
         fi
     done
 
     log "Restore complete"
 }
 
-# -----------------------------------------------------------------------------
-# BACKUP: Copy config back to persistent storage
-# -----------------------------------------------------------------------------
-backup_to_persistent() {
-    log "Backing up data to $PERSISTENT_DIR ..."
-    mkdir -p "$PERSISTENT_DIR"
+# ---------------------------------------------------------------------------
+# BACKUP: Copy config back to Azure Files (NOT SQLite DBs)
+# ---------------------------------------------------------------------------
+backup_to_azure_files() {
+    log "Backing up config to $BACKUP_DIR ..."
+    mkdir -p "$BACKUP_DIR"
 
-    # Backup non-DB files only (SQLite DBs stay local)
+    # Config / stateless files only — SQLite DBs stay on EmptyDir
     for item in .env skills cron active-skills; do
         src="$HERMES_HOME/$item"
-        dst="$PERSISTENT_DIR/$item"
+        dst="$BACKUP_DIR/$item"
         if [[ -e "$src" ]]; then
             rm -rf "$dst"
             cp -r "$src" "$dst"
@@ -71,39 +86,39 @@ backup_to_persistent() {
     log "Backup complete"
 }
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # PERIODIC BACKUP: Run backup every N seconds in background
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 start_periodic_backup() {
     local interval="${BACKUP_INTERVAL:-300}"  # default 5 minutes
     log "Starting periodic backup every ${interval}s ..."
     while true; do
         sleep "$interval"
-        backup_to_persistent
+        backup_to_azure_files
     done &
 }
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # MAIN
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 main() {
     log "=========================================="
-    log "Hermes Container Init"
+    log "Hermes Container Init (EmptyDir edition)"
     log "HERMES_HOME=$HERMES_HOME"
-    log "PERSISTENT_DIR=$PERSISTENT_DIR"
+    log "BACKUP_DIR=$BACKUP_DIR"
     log "=========================================="
 
-    # Restore config on startup
-    restore_from_persistent
+    # On restart: EmptyDir retains data; on fresh replica: restore from backup
+    restore_from_backup
 
-    # Create HERMES_HOME structure if it doesn't exist
+    # Ensure directory structure exists
     mkdir -p "$HERMES_HOME"/{skills,active-skills,cron,logs}
 
     # Start background periodic backup
     start_periodic_backup
 
-    # Set up trap to backup on shutdown signals
-    trap backup_to_persistent EXIT SIGTERM SIGINT
+    # Backup on any shutdown signal
+    trap backup_to_azure_files EXIT SIGTERM SIGINT
 
     log "Starting hermes gateway ..."
     exec hermes gateway "$@"

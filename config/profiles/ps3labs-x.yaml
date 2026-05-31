@@ -1,0 +1,96 @@
+# =============================================================================
+# Profile: ps3labs-x (X/Twitter)
+# =============================================================================
+model:
+  provider: azure-foundry
+  base_url: ${AZURE_FOUNDRY_BASE_URL}
+  api_mode: chat_completions
+  auth_mode: api_key
+  default: ${DEFAULT_MODEL:-Kimi-K2.6}
+  context_length: 128000
+  api_key: ${AZURE_FOUNDRY_API_KEY}
+
+gateway:
+  platforms:
+    telegram:
+      token_env: TELEGRAM_BOT_TOKEN
+      allowed_users: "*"
+      unauthorized_dm_behavior: ignore
+      reply_to_mode: first
+      reply_prefix: "🐦 [X]: "
+      
+    discord:
+      token_env: DISCORD_BOT_TOKEN
+      allowed_users:
+        - "${FOUNDER_DISCORD_ID}"
+      dm_only: true
+
+display:
+  tool_progress: new
+  busy_ack_enabled: true
+  busy_ack_detail: false
+  platforms:
+    telegram:
+      tool_progress: off
+      busy_ack_detail: false
+
+cron:
+  jobs:
+    - name: x_post_morning
+      schedule: "0 8 * * *"
+      command: "python -m skills.social_media create-post --platform x --profile ps3labs"
+    
+    - name: x_post_afternoon
+      schedule: "0 14 * * *"
+      command: "python -m skills.social_media create-post --platform x --profile ps3labs"
+    
+    - name: x_engagement_check
+      schedule: "0 */2 * * *"
+      command: "python -m skills.social_media engagement --platform x --profile ps3labs"
+    
+    - name: x_dm_responses
+      schedule: "0 10,16 * * *"
+      command: "python -m skills.social_media respond-dms --platform x --profile ps3labs"
+    
+    - name: git_sync
+      schedule: "0 2 * * *"
+      command: "bash /app/scripts/git-sync.sh"
+
+skills:
+  paths:
+    - /app/skills
+    - /app/active-skills
+
+web:
+  backend: ${WEB_SEARCH_BACKEND:-duckduckgo}
+  search_backend: ${WEB_SEARCH_BACKEND:-duckduckgo}
+
+auxiliary:
+  vision:
+    provider: azure-foundry
+    model: Kimi-K2.6
+    base_url: ${AZURE_FOUNDRY_BASE_URL}
+    api_key: ${AZURE_FOUNDRY_API_KEY}
+  
+  web_extract:
+    provider: azure-foundry
+    model: Kimi-K2.6
+    base_url: ${AZURE_FOUNDRY_BASE_URL}
+    api_key: ${AZURE_FOUNDRY_API_KEY}
+
+sessions:
+  auto_prune: true
+  retention_days: 90
+  min_interval_hours: 24
+  vacuum_after_prune: true
+
+security:
+  redact_secrets: true
+
+# Profile metadata
+profile:
+  name: ps3labs-x
+  platform: x
+  brand_voice: "Innovative, technical, forward-thinking. Shares AI/ML breakthroughs, startup lessons, and thought leadership."
+  target_audience: "AI researchers, startup founders, tech enthusiasts"
+  posting_strategy: "2-3 posts/day. Mix of technical insights, company updates, and industry commentary."

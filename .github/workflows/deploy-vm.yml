@@ -1,0 +1,87 @@
+name: Build and Deploy to Azure VM
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_ACR_NAME: ${{ secrets.AZURE_ACR_NAME }}
+  IMAGE_NAME: outreach-agent
+  VM_HOST: ${{ secrets.VM_HOST }}
+  VM_USER: ${{ secrets.VM_USER || 'outreach' }}
+  VM_PROFILES: "default ps3labs-x ps3labs-linkedin"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ env.AZURE_ACR_NAME }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.AZURE_ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.AZURE_ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/outreach-vm
+          chmod 600 ~/.ssh/outreach-vm
+          ssh-keyscan -H ${{ env.VM_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VM
+        run: |
+          ssh -i ~/.ssh/outreach-vm \
+            -o StrictHostKeyChecking=yes \
+            ${{ env.VM_USER }}@${{ env.VM_HOST }} \
+            "cd /opt/hermes && docker-compose pull && docker-compose up -d"
+
+      - name: Verify deployment
+        run: |
+          ssh -i ~/.ssh/outreach-vm \
+            ${{ env.VM_USER }}@${{ env.VM_HOST }} \
+            "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' | grep hermes"
+
+      - name: Show logs (last 30 lines)
+        if: failure() || github.event_name == 'workflow_dispatch'
+        run: |
+          for profile in ${{ env.VM_PROFILES }}; do
+            echo "=== $profile logs ==="
+            ssh -i ~/.ssh/outreach-vm \
+              ${{ env.VM_USER }}@${{ env.VM_HOST }} \
+              "docker logs --tail 30 hermes-$profile 2>&1 || true"
+          done

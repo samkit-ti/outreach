@@ -1,0 +1,60 @@
+#cloud-config
+package_update: true
+packages:
+  - docker.io
+  - docker-compose
+  - git
+  - curl
+  - jq
+  - rsync
+  - sqlite3
+  - htop
+  - tmux
+
+users:
+  - default
+  - name: ${admin_user}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: docker
+    shell: /bin/bash
+
+runcmd:
+  # Enable and start Docker
+  - systemctl enable docker
+  - systemctl start docker
+  
+  # Create Hermes directory structure with multi-profile support
+  - mkdir -p /opt/hermes/{profiles,shared,backups}
+  - mkdir -p /opt/hermes/shared/{skills,config,scripts}
+  - chown -R ${admin_user}:${admin_user} /opt/hermes
+  
+  # Mount persistent data disk
+  - |
+    DATA_DISK=$(lsblk -dpno NAME,SIZE | grep -E "64G|63G|62G" | awk '{print $1}' | head -1)
+    if [ -n "$DATA_DISK" ] && [ ! -d /opt/hermes/data ]; then
+      mkfs.ext4 -F "$DATA_DISK"
+      mkdir -p /opt/hermes/data
+      mount "$DATA_DISK" /opt/hermes/data
+      echo "$DATA_DISK /opt/hermes/data ext4 defaults,noatime 0 2" >> /etc/fstab
+    fi
+  
+  # Create profile directories
+  - mkdir -p /opt/hermes/profiles/{default,ps3labs-x,ps3labs-linkedin}
+  - for profile in default ps3labs-x ps3labs-linkedin; do mkdir -p /opt/hermes/profiles/$profile/{.hermes,logs,cron}; done
+  - chown -R ${admin_user}:${admin_user} /opt/hermes
+  
+  # Setup logrotate for Hermes logs
+  - |
+    cat << 'LOGROTATE' > /etc/logrotate.d/hermes
+    /opt/hermes/profiles/*/logs/*.log {
+      daily
+      rotate 7
+      compress
+      delaycompress
+      missingok
+      notifempty
+    }
+    LOGROTATE
+  
+  # Print completion
+  - echo "Hermes VM setup complete" > /opt/hermes/setup-complete.txt

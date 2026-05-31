@@ -1,0 +1,88 @@
+version: "3.8"
+
+services:
+  hermes-default:
+    image: ${ACR_LOGIN_SERVER:-outreachacr.local}/outreach-agent:latest
+    container_name: hermes-default
+    restart: unless-stopped
+    environment:
+      - HERMES_HOME=/app/.hermes
+      - HERMES_DIR=/app
+      - HERMES_PROFILE=default
+      - PYTHONPATH=/app
+    volumes:
+      - /opt/hermes/profiles/default/.hermes:/app/.hermes
+      - /opt/hermes/shared/skills:/app/skills:ro
+      - /opt/hermes/shared/config:/app/config:ro
+      - /opt/hermes/profiles/default/logs:/app/logs
+    networks:
+      - hermes
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  hermes-ps3labs-x:
+    image: ${ACR_LOGIN_SERVER:-outreachacr.local}/outreach-agent:latest
+    container_name: hermes-ps3labs-x
+    restart: unless-stopped
+    environment:
+      - HERMES_HOME=/app/.hermes
+      - HERMES_DIR=/app
+      - HERMES_PROFILE=ps3labs-x
+      - PYTHONPATH=/app
+      - X_PROFILE=ps3labs
+    volumes:
+      - /opt/hermes/profiles/ps3labs-x/.hermes:/app/.hermes
+      - /opt/hermes/shared/skills:/app/skills:ro
+      - /opt/hermes/shared/config:/app/config:ro
+      - /opt/hermes/profiles/ps3labs-x/logs:/app/logs
+    networks:
+      - hermes
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  hermes-ps3labs-linkedin:
+    image: ${ACR_LOGIN_SERVER:-outreachacr.local}/outreach-agent:latest
+    container_name: hermes-ps3labs-linkedin
+    restart: unless-stopped
+    environment:
+      - HERMES_HOME=/app/.hermes
+      - HERMES_DIR=/app
+      - HERMES_PROFILE=ps3labs-linkedin
+      - PYTHONPATH=/app
+      - LINKEDIN_PROFILE=ps3labs
+    volumes:
+      - /opt/hermes/profiles/ps3labs-linkedin/.hermes:/app/.hermes
+      - /opt/hermes/shared/skills:/app/skills:ro
+      - /opt/hermes/shared/config:/app/config:ro
+      - /opt/hermes/profiles/ps3labs-linkedin/logs:/app/logs
+    networks:
+      - hermes
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=60
+      - WATCHTOWER_INCLUDE_STOPPED=true
+      - WATCHTOWER_CLEANUP=true
+    command: --interval 60 hermes-default hermes-ps3labs-x hermes-ps3labs-linkedin
+    networks:
+      - hermes
+
+networks:
+  hermes:
+    driver: bridge

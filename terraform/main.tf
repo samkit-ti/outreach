@@ -145,10 +145,12 @@ resource "azurerm_container_app" "outreach" {
       cpu    = 0.5
       memory = "1Gi"
 
-      # Mount persistent storage
+      # Mount persistent storage at /app/persistent (NOT HERMES_HOME)
+      # SQLite databases don't work on Azure Files (SMB locking).
+      # Persistent data is synced by init-hermes.sh.
       volume_mounts {
         name = "outreach-data"
-        path = "/app/data"
+        path = "/app/persistent"
       }
 
       env {
@@ -157,18 +159,13 @@ resource "azurerm_container_app" "outreach" {
       }
 
       env {
-        name  = "DATA_DIR"
-        value = "/app/data"
-      }
-
-      env {
         name  = "HERMES_HOME"
-        value = "/app/data/.hermes"
+        value = "/app/.hermes"
       }
 
       env {
         name  = "HERMES_DIR"
-        value = "/app/data"
+        value = "/app"
       }
     }
 

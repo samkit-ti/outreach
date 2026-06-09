@@ -127,7 +127,7 @@ resource "azurerm_linux_virtual_machine" "outreach" {
 
   admin_ssh_key {
     username   = var.vm_admin_username
-    public_key = file(var.ssh_public_key_path)
+    public_key = file(pathexpand(var.ssh_public_key_path))
   }
 
   os_disk {
@@ -172,32 +172,7 @@ resource "azurerm_virtual_machine_data_disk_attachment" "outreach_data" {
   caching            = "ReadWrite"
 }
 
-# Container Registry (kept for building/pushing images)
-resource "azurerm_container_registry" "outreach" {
-  name                = "${var.app_name}acr${random_string.suffix.result}"
-  resource_group_name = azurerm_resource_group.outreach.name
-  location            = azurerm_resource_group.outreach.location
-  sku                 = "Basic"
-  admin_enabled       = true
-
-  tags = {
-    Project = "outreach-agent"
-  }
-}
-
-# Storage Account (kept for backups)
-resource "azurerm_storage_account" "outreach" {
-  name                     = "${var.app_name}data${random_string.suffix.result}"
-  resource_group_name      = azurerm_resource_group.outreach.name
-  location                 = azurerm_resource_group.outreach.location
-  account_tier             = "Standard"
-  account_replication_type = "LRS"
-  min_tls_version          = "TLS1_2"
-
-  tags = {
-    Project = "outreach-agent"
-  }
-}
+# Container Registry and Storage Account are defined in main.tf
 
 # Outputs
 output "vm_public_ip" {
@@ -212,15 +187,4 @@ output "vm_fqdn" {
   value = azurerm_public_ip.outreach.fqdn
 }
 
-output "acr_login_server" {
-  value = azurerm_container_registry.outreach.login_server
-}
-
-output "acr_username" {
-  value = azurerm_container_registry.outreach.admin_username
-}
-
-output "acr_password" {
-  value     = azurerm_container_registry.outreach.admin_password
-  sensitive = true
-}
+# ACR outputs are defined in main.tf

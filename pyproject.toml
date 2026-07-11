@@ -27,6 +27,8 @@ dependencies = [
     "requests>=2.31.0",
     "pyyaml>=6.0.1",
     "python-dotenv>=1.2.0",
+    "tweepy>=4.14.0",
+    "croniter>=2.0.0",
 ]
 
 [project.optional-dependencies]

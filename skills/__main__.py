@@ -50,6 +50,7 @@ SKILL_MAP = {
     "outreach_drafter": "skills.outreach_drafter",
     "evolution_engine": "skills.evolution_engine",
     "crm_toolkit": "skills.crm_toolkit",
+    "social_media": "skills.social_media",
 }
 
 

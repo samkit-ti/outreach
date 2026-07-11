@@ -16,7 +16,10 @@ RUN pip install --no-cache-dir \
     "git+https://github.com/NousResearch/hermes-agent.git#egg=hermes-agent" \
     "python-dotenv>=1.2.0" \
     "requests>=2.31.0" \
-    "pyyaml>=6.0.1"
+    "pyyaml>=6.0.1" \
+    "discord.py>=2.3.0" \
+    "tweepy>=4.14.0" \
+    "croniter>=2.0.0"
 
 # Set up Hermes home directory
 # IMPORTANT: HERMES_HOME is mounted as EmptyDir so SQLite survives restarts.
@@ -27,11 +30,12 @@ ENV HOME=/app
 ENV BACKUP_INTERVAL=300
 ENV BACKUP_DIR=/app/backup
 
-# Copy our custom skills
+# Copy our custom skills and Discord bridge
 COPY skills/ /app/skills/
 COPY config/ /app/config/
 COPY scripts/init-hermes.sh /app/scripts/init-hermes.sh
 COPY scripts/init-crm-db.py /app/scripts/init-crm-db.py
+COPY scripts/discord-gateway.py /app/scripts/discord-gateway.py
 RUN chmod +x /app/scripts/init-hermes.sh
 
 # Create Hermes home structure (EmptyDir mount point)

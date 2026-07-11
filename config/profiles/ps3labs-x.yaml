@@ -1,6 +1,23 @@
 # =============================================================================
 # Profile: ps3labs-x (X/Twitter)
 # =============================================================================
+# X API credentials
+# NOTE: For automated posting, use OAuth 1.0a (no callback needed).
+# Generate these 4 tokens at https://developer.twitter.com/en/portal/dashboard:
+# 1. Go to Keys and Tokens → Regenerate (API Key & Secret)
+# 2. Go to Authentication Tokens → Generate (Access Token & Secret)
+# Paste them below. NO callback URL needed for this flow.
+# 
+# Only set a callback if you specifically need OAuth 2.0 Authorization Code flow.
+# If so, use the Azure VM public IP, e.g.:
+#   callback_url: http://<vm-public-ip>:8443/callback
+x_api:
+  bearer_token: ${X_BEARER_TOKEN}
+  api_key: ${X_API_KEY}
+  api_secret: ${X_API_SECRET}
+  access_token: ${X_ACCESS_TOKEN}
+  access_secret: ${X_ACCESS_SECRET}
+
 model:
   provider: azure-foundry
   base_url: ${AZURE_FOUNDRY_BASE_URL}

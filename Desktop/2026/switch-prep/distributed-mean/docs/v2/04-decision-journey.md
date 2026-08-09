@@ -1,314 +1,211 @@
-# Distributed Mean — Design by Delivery Tier
+# Distributed Mean — Decision Index
 
 **Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2
 
-Every design decision, organized by delivery tier — Scope → Bare minimum → MVP →
-Edge cases → Optimizations. Each decision is stated as the question that raises it,
-followed by the answer, a minimal proof, and the record that freezes it. Questions
-are asked from zero knowledge; answers contain no alternatives — the full
-trade-off analysis lives in the linked ITD.
+Every design decision as a question → the chosen answer with one line of reasoning →
+the alternatives, one line each. Full arguments, proofs, and trade-off analysis live
+in the linked ITDs. Tiers: **Scope** (what and why) → **Bare minimum** (the smallest
+*correct* system) → **MVP** (the smallest *operable* system) → **Optimizations** →
+**Edge cases**.
 
 ---
 
 ## 1. Scope
 
-**What must the system do?**
-Accept a job `(F, C)` over an API; generate F files of C random values; compute the
-index-wise mean across all F files; combine worker outputs into a single result file;
-support multiple concurrent jobs; run on W system-level workers that idle until work
-arrives. Bonus scope: W configurable via the API; a live UI of system state.
-→ [01 §1](01-requirements-and-assumptions.md)
+**What must the system do?** Accept jobs `(F, C)` over an API; generate F files of C
+random values; compute the index-wise mean; combine worker outputs into one result
+file; run multiple jobs concurrently on W pull-based workers. Bonus: W configurable
+via API; live UI. → [01 §1](01-requirements-and-assumptions.md)
 
-**What must it tolerate?**
-A worker may hold at most 5 files' worth of data at a time (1 file = C float64 ≈ 8 MB
-at C = 10⁶). Workers run at different speeds and must not idle while eligible work
-exists. Workers crash, stall, and receive the same task twice. At the ceiling
-(F ≈ 10⁵, C ≈ 10⁶) input is ≈ 800 GB — no single node may stream the whole dataset,
-and no queue message may carry data.
-→ [01 §2, §4](01-requirements-and-assumptions.md)
+**What must it tolerate?** K = 5 files per worker (1 file = 8 MB at C = 10⁶);
+heterogeneous worker speeds with minimal idling; crashes, stalls, duplicate
+deliveries; ≈ 800 GB input at the ceiling — no single-node streaming, no data in
+queue messages. → [01 §2, §4](01-requirements-and-assumptions.md)
 
-**What is out of scope?**
-Authentication, multi-tenancy, quotas, cancellation (designed but not built:
-`status='cancelled'` drains via the claim query's job-status filter), cross-region
-operation, exactly-once delivery (replaced by idempotent effects).
+**What is out of scope?** Auth, multi-tenancy, quotas, cancellation (designed, not
+built), cross-region, exactly-once delivery (replaced by idempotent effects).
 → [01 §5](01-requirements-and-assumptions.md)
 
-**Should this be built, or should an existing compute engine be used?**
-Built. The brief fixes the components (Node/Express/TS API, DB, queue, Python
-workers) and the orchestration algorithm is itself the deliverable; furthermore the
-design's correctness depends on one atomic transaction (consume partial results +
-enqueue their combiner) that no engine exposes across its API. Absent these
-constraints, an off-the-shelf data-parallel engine is the correct choice.
-→ [DM-011](itds/DM-011-build-vs-offtheshelf.md)
+**Build, or adopt an existing engine?**
+→ **Build on primitives** — the brief fixes the components and the orchestration
+algorithm is the deliverable; the correctness spine (consume partials + enqueue
+combiner, atomically) fits no engine's transaction boundary. [DM-011](itds/DM-011-build-vs-offtheshelf.md)
+- *Spark/Dask*: computes this in six lines but erases the deliverable and assumes homogeneous, co-scheduled executors.
+- *Temporal/Step Functions*: ~27k activities per job fights its history model; the consumption invariant stays outside its transactions.
+- *Celery/RQ/Ray*: counter-based fan-in plus a broker↔DB dual-write; TS producer is second-class.
 
 ---
 
-## 2. Bare minimum
+## 2. Bare minimum — the smallest correct system
 
-The smallest system that returns a *correct* mean for any valid (F, C): one API
-endpoint, the queue, workers, an object store, and the completion rule. No fairness,
-no fault tolerance beyond retries, no UI.
+Returns an exact mean for any valid (F, C), end to end. Acceptance: correctness only.
 
-**What is the computation, mathematically?**
-`output[i] = (Σ_f file_f[i]) / F`. Division by a constant commutes with summation,
-and float64 vector addition is associative and commutative — so the problem is a
-fold over a commutative monoid, which admits order-free, coordinator-free
-aggregation. Every decision below inherits from this fact.
-→ [HLD §1](02-hld.md)
+**What is the computation, structurally?**
+→ **A fold over a commutative monoid** — sums are associative and commutative, so
+aggregation can be order-free and coordinator-free; divide by F once at the end.
+[HLD §1](02-hld.md) *(no alternatives — this is arithmetic)*
 
-**What should workers exchange with each other?**
-Sum-vectors paired with a count of files covered: `(Σ, n)`. Proof of necessity:
-averaging averages is only correct for equal group sizes — F = 12 splits 5+5+2, and
-with ten files of 0.0 and two of 1.0 the true mean is 0.1667 while the average of
-group-averages is 0.3333. Carrying `(Σ, n)` makes the weighting structural; division
-by F happens exactly once, at the end.
-→ [DM-001](itds/DM-001-aggregation-topology.md), [DM-010](itds/DM-010-numerical-correctness.md)
+**What do workers exchange?**
+→ **(sum-vector, count) pairs** — makes any grouping correct by construction; at
+F = 12 (groups 5+5+2) averaging averages returns 0.333 for a true 0.167. [DM-001](itds/DM-001-aggregation-topology.md)
+- *Means*: silently wrong for unequal groups, and unequal groups are the normal case.
+- *Raw values*: data volume never shrinks; combiners would re-read everything.
 
-**How is the job divided, given a worker holds at most five files?**
-Into tasks of ≤ 5 files each (`map`), producing ⌈F/5⌉ partial results. A partial is
-C float64s — the same shape as a file — so the 5-file limit binds combination steps
-identically: combining partials requires its own tasks (`reduce`, fan-in ≤ 5),
-recursively, giving ⌈log₅⌈F/5⌉⌉ levels (7 at F = 10⁵). A flat combine is impossible
-by the constraint itself.
-→ [DM-001](itds/DM-001-aggregation-topology.md)
+**How is the job divided under the 5-file limit?**
+→ **Map tasks of ≤ 5 files, then recursive ≤ 5-fan-in reduce tasks** — a partial is
+file-shaped, so the limit binds combiners too; depth ⌈log₅⌈F/5⌉⌉ = 7 at F = 10⁵. [DM-001](itds/DM-001-aggregation-topology.md)
+- *Flat combine*: illegal — 20,000 inputs against a fan-in of 5.
+- *Sharding the C dimension*: wrong axis — the constraint counts files, not vector width.
 
-**When do combination tasks get created?**
-At the moment enough inputs exist: whenever a job has ≥ 5 unconsumed partials, the
-transaction committing the newest one atomically claims five and enqueues a `reduce`.
-The combination tree is therefore never planned in advance — it emerges from
-completion order, so no task ever waits on a specific sibling. The pairing step is
-serialised per job with an advisory lock; otherwise two simultaneous committers can
-each see an incomplete picture and both decline, leaving the job permanently stalled
-(reachable at F = 7 with two workers).
-→ [DM-002](itds/DM-002-work-distribution-stragglers.md), [LLD §4](03-lld.md)
+**When are combine tasks created?**
+→ **Eagerly, whenever ≥ 5 partials exist, inside the committing transaction under a
+per-job advisory lock** — no task ever waits on a named sibling, and concurrent
+committers cannot both undercount and both decline. [DM-002](itds/DM-002-work-distribution-stragglers.md)
+- *Pre-planned tree*: one slow child stalls its branch despite ready partials elsewhere.
+- *Map-all-then-reduce barrier*: the slowest of 20,000 maps gates every combiner.
+- *Central streaming accumulator*: feasible on memory (8 MB) but 160 GB through one NIC is a serial floor.
 
-**How do tasks reach workers?**
-Workers pull from a shared queue when free; nothing is ever assigned. The queue is a
-Postgres table claimed with `FOR UPDATE SKIP LOCKED`. Proof of fit: the pairing step
-above must atomically {mark partials consumed + insert their reduce task}; with an
-external broker either write order fails (commit-then-send strands the partials;
-send-then-commit double-counts sums), while in Postgres it is one transaction. Load
-is ~27k tasks per maximal job at seconds each — well inside a single table's range.
-→ [DM-004](itds/DM-004-queue-technology.md), claim SQL in [LLD §3](03-lld.md)
+**How do tasks reach workers, and on what queue?**
+→ **Workers pull from a Postgres `FOR UPDATE SKIP LOCKED` table** — pairing must
+atomically {consume partials + insert their reduce}, and only the DB-as-queue makes
+that one transaction; load (~27k tasks/job, seconds each) is far inside its range. [DM-004](itds/DM-004-queue-technology.md)
+- *SQS*: enqueue + DB state is a dual-write; either order strands work or double-counts sums; the outbox fix rebuilds a DB queue anyway.
+- *RabbitMQ*: same dual-write, plus a broker to operate.
+- *Redis*: same dual-write with weaker delivery semantics.
+- *Push assignment*: speed estimates are always stale; mis-assignments become idle time.
 
-**How is idle time kept low when workers run at very different speeds?**
-By the pull model itself: a worker holds work only while executing it, so a 3× faster
-worker simply claims 3× as often — proportional load with no speed estimation, no
-rebalancing, and no scheduler component. A slow-but-alive worker's blast radius is
-exactly one task (~seconds), independent of F; and because combination tasks are
-created eagerly, fast workers combine finished partials while slow workers are still
-mapping. A worker idles only when zero eligible tasks exist system-wide.
-→ [DM-002](itds/DM-002-work-distribution-stragglers.md)
+**How is idle time kept low across heterogeneous speeds?**
+→ **The pull model itself, plus map/reduce overlap** — a 3× faster worker claims 3×
+as often; a slow worker's blast radius is one task regardless of F. [DM-002](itds/DM-002-work-distribution-stragglers.md)
+- *Speed-tracking scheduler*: adds an estimator whose every error is idle time.
+- *Speculative re-execution*: duplicate I/O for a tail the leases already bound — deferred (§4).
 
 **Where do the bytes live?**
-An S3-API object store (MinIO locally, S3 on AWS); the queue and database carry URIs
-only. An 8 MB partial exceeds queue-message limits by ~32×. Inputs are CSV; partials
-are raw little-endian float64 (8 MB vs ~20 MB, zero parse cost in both languages).
-→ [DM-005](itds/DM-005-data-placement-and-format.md)
+→ **S3-API object store (MinIO local / S3 on AWS); queue and DB carry URIs; CSV in,
+raw float64 partials** — an 8 MB partial exceeds message limits ~32×; binary halves
+size and eliminates parsing in both languages. [DM-005](itds/DM-005-data-placement-and-format.md)
+- *API-local filesystem*: permitted by the brief but single-node — no fleet story.
+- *NFS/EFS*: multi-node but weak consistency/throughput for this pattern.
+- *In the DB or in messages*: puts the data plane on the control plane; dies at 8 MB × 25k objects.
 
 **How does the system know a job is finished?**
-By proof: `map` and `reduce` preserve the total count of covered files, and
-consumption is exactly-once, so a job's unconsumed partials always partition its F
-files — a lone unconsumed partial with `count = F` therefore *is* the completed sum
-(cannot occur early, cannot be missed). Paired with one liveness check (no
-pending/claimed tasks for the job), evaluated inside the same committing
-transaction. A `finalize` task divides by F and writes the result.
-→ [DM-003](itds/DM-003-job-completion-detection.md)
+→ **A lone unconsumed partial with count = F, plus no tasks in flight** — counts are
+conserved and consumption is exactly-once, so unconsumed partials always partition
+the F files: the condition is a proof, evaluated in the committing transaction. [DM-003](itds/DM-003-job-completion-detection.md)
+- *Task counter*: the task count is dynamic and redelivery corrupts decrements.
+- *Polling coordinator*: adds latency and a component to notice what the transaction already knows.
+- *Queue-empty*: racy, and meaningless with concurrent jobs.
 
 **Who creates the input files?**
-Distributed `generate` tasks (~50 files each, per-file deterministic seeds), riding
-the same queue — generating 800 GB on the API's submit path would serialise the job
-before it starts. Each generate task spawns its batch's map tasks on completion.
-→ [LLD §2](03-lld.md)
+→ **Distributed `generate` tasks (~50 files each, per-file seeds) on the same queue**
+— 800 GB on the API's submit path would bottleneck the job before it starts. [LLD §2](03-lld.md)
+- *API-side generation*: the central-accumulator mistake at the front door.
 
 ---
 
-## 3. MVP
+## 3. MVP — the smallest operable system
 
-Adds to the bare minimum everything required for real operation: concurrent users,
-crashing workers, result delivery, and the two bonus requirements.
+Bare minimum + survives real use: concurrent users, crashing workers, delivery,
+observability, both bonuses. Acceptance: operability.
 
-**What happens when several jobs run at once?**
-The claim query orders candidates by (tasks in flight for that job ASC, task
-priority, age) — the least-served job always goes first, yielding round-robin
-without a scheduler. A 4-task job entering behind a 27,000-task job completes in
-roughly its own work time instead of hours; the large job loses ~0.01% of its
-worker-seconds. Priority runs `finalize > reduce > map > generate` because reduce
-depth is the critical path and map width is surplus parallelism.
-→ [DM-007](itds/DM-007-multi-job-fairness.md)
+**Several jobs at once — who gets the workers?**
+→ **Least-served job first, via the claim query's ORDER BY (in-flight ASC, priority,
+age)** — a 4-task job behind a 27k-task job finishes in its own work time; the big
+job loses ~0.01%. [DM-007](itds/DM-007-multi-job-fairness.md)
+- *FIFO*: hours of convoy for seconds of work; more workers never reorder it.
+- *Per-job queues*: dynamic queue management for what one ORDER BY does.
+- *Weighted fair queuing*: needs tenant semantics that don't exist — deferred (§4).
 
 **What happens when a worker dies mid-task?**
-Every claim carries a 30 s lease, extended by a 10 s heartbeat; a reaper (5 s sweep)
-returns expired tasks to the queue — crash detection ≤ 35 s. After three attempts a
-task is dead and its job fails with a recorded cause.
-→ [DM-006](itds/DM-006-state-model-failure-handling.md)
+→ **30 s lease + 10 s heartbeat + 5 s reaper** — detection ≤ 35 s, task requeued,
+three attempts then the job fails loudly. [DM-006](itds/DM-006-state-model-failure-handling.md)
+- *At-most-once*: silently loses work.
+- *2PC/exactly-once*: unattainable across queue + object store; costs latency chasing it.
+- *External membership service (ZK/etcd)*: a second stateful system for what a column does.
 
-**How can a task safely run twice?**
-All effects are idempotent: output objects have deterministic names derived from the
-task (a retry overwrites itself byte-identically — generation is seeded per file, so
-even inputs regenerate exactly); the partial-metadata insert is unique per producing
-task; commits and heartbeats are fenced by a per-claim token plus task status, and
-the reaper rotates the token on requeue. At-least-once delivery plus idempotent
-effects is outcome-equivalent to exactly-once.
-→ [DM-006](itds/DM-006-state-model-failure-handling.md)
+**How can the same task safely run twice?**
+→ **Idempotent effects: deterministic output keys, token+status-fenced commits and
+heartbeats, unique partial-per-task inserts** — at-least-once plus idempotency is
+outcome-equivalent to exactly-once. [DM-006](itds/DM-006-state-model-failure-handling.md)
+- *Execution-time dedupe*: racy; prevention at the effect layer is unconditional.
+- *Storage-layer fencing*: unnecessary once the write itself is idempotent.
 
-**How does the user receive the result?**
-`GET /jobs/:id/result` returns `302` to a 15-minute pre-signed URL, keeping the API
-off the data plane (a C = 10⁶ result is ~20 MB); `?inline=1` proxies the stream.
-Completion is discovered via the `job.completed` event or by polling. Submission is
-idempotent via an `Idempotency-Key` header; jobs exceeding `MAX_JOB_BYTES` or the
-active-job cap are rejected at the door (`413`/`429`).
-→ [DM-005](itds/DM-005-data-placement-and-format.md), [LLD §6](03-lld.md)
+**How does the user get the result?**
+→ **`302` to a 15-minute pre-signed URL (`?inline=1` to proxy)** — keeps the API off
+the data plane; completion announced by event or poll; submissions idempotent by
+header; oversized/flooding jobs rejected at the door. [DM-005](itds/DM-005-data-placement-and-format.md), [LLD §6](03-lld.md)
+- *API streams the file*: puts a 20 MB body per download through the control plane.
+- *Webhooks*: no authenticated callee exists to sign for.
 
-**How is the number of workers controlled through the API?** *(bonus)*
-The API writes `desired_workers`; a supervisor loop converges actual to desired —
-docker compose scale locally, `ecs.updateService(desiredCount)` on AWS. Scale-down
-drains gracefully (finish task, commit, exit) with the lease as backstop, so
-correctness never depends on the drain. A worker is one process: a fault costs one
-lease, and W remains a single knob.
-→ [DM-008](itds/DM-008-worker-pool-w-configurability.md)
+**How is W controlled through the API?** *(bonus)*
+→ **API writes `desired_workers`; a supervisor reconciles actual → desired** —
+compose scale locally, `ecs.updateService` on AWS; drain is graceful with the lease
+as backstop; one process per worker keeps a fault's cost to one lease. [DM-008](itds/DM-008-worker-pool-w-configurability.md)
+- *Fixed W in compose*: forfeits the bonus.
+- *Workers self-managing their population*: bootstrap and scale-down races.
+- *Queue-depth autoscaling*: the requirement is user-set W — deferred (§4).
 
 **How does an operator watch the system?** *(bonus)*
-An append-only `events` table streamed over SSE (auto-reconnect with
-`Last-Event-ID`; a BIGSERIAL id makes resume a one-line predicate), with task-level
-noise folded into a 1 Hz snapshot. Per-job progress is file coverage,
-`(mapped + consumed) / (F + R_est)` — monotone because it is derived from
-idempotently-keyed state rows, clamped at 99% so only `finalize` reports 100%. Two
-stall gauges (oldest pending / oldest claimed task age) are the alerting signals.
-→ [DM-009](itds/DM-009-observability-ui.md)
+→ **Append-only events + SSE, task noise folded into a 1 Hz snapshot; progress =
+file coverage, clamped at 99% until finalize** — monotone by construction where
+done/total would move backwards as reduce tasks appear. [DM-009](itds/DM-009-observability-ui.md)
+- *Polling only*: N-second latency and chatter — kept as fallback.
+- *WebSockets*: bidirectional machinery for a one-way flow; no built-in resume.
+- *Prometheus/Grafana*: right at production scale, heavyweight here — deferred (§4).
 
 **How does it deploy?**
-Locally: docker-compose (API, Postgres 16, MinIO, W workers, supervisor, static UI).
-AWS: the same containers on ECS Fargate + RDS Multi-AZ + S3 behind an ALB — a
-configuration change, not a rewrite.
-→ [HLD §6](02-hld.md), [LLD §9](03-lld.md)
+→ **docker-compose locally; the same containers on ECS Fargate + RDS + S3 behind an
+ALB** — a configuration change, not a rewrite. [HLD §6](02-hld.md) *(no contested alternatives)*
 
 ---
 
-## 4. Edge cases
+## 4. Optimizations
+
+### In the design
+
+- **Fan-in 5 in steady state** — reduce bytes scale as k/(k−1): ~200 GB at k=5 vs ~320 GB at k=2, 4× fewer tasks, half the depth. [DM-002](itds/DM-002-work-distribution-stragglers.md)
+- **Drain-mode fan-in 2–4 in the tail** — removes an unbounded stall for ≤ ~7 extra reduces (< 0.15%). [DM-002](itds/DM-002-work-distribution-stragglers.md)
+- **Map/reduce overlap** — no phase barrier anywhere; a straggler delays only its own 8 MB. [DM-002](itds/DM-002-work-distribution-stragglers.md)
+- **Claim priority `finalize > reduce > map > generate`** — shortens the critical path and frees storage first. [DM-007](itds/DM-007-multi-job-fairness.md)
+- **Raw float64 partials** — 2.5× smaller than CSV, zero parse cost both sides. [DM-005](itds/DM-005-data-placement-and-format.md)
+- **Pairwise-structured summation** — error O(log₅F·ε) ≈ 9×10⁻¹⁶ at F = 10⁵; accuracy-neutral vs the standard single-node baseline. [DM-010](itds/DM-010-numerical-correctness.md)
+
+### Deferred, with triggers
+
+- **Speculative tail re-execution** — if p99 completion > 1.5× throughput projection: duplicate the projected-last tasks, first commit wins (idempotency makes it safe). [DM-002](itds/DM-002-work-distribution-stragglers.md)
+- **`LISTEN/NOTIFY` wake-up** — if the 500 ms idle poll's claim latency matters: drop-in. [DM-004](itds/DM-004-queue-technology.md)
+- **SQS + transactional outbox** — at sustained > 5k tasks/s, cross-region consumers, or multi-service fan-out; behind the existing `QueueAdapter`. [DM-004](itds/DM-004-queue-technology.md)
+- **PgBouncer** — as W approaches the hundreds. [DM-004](itds/DM-004-queue-technology.md)
+- **In-worker pre-combining** — if intermediate I/O > ~40% of wall-clock: combine locally before writing, level-0 traffic 160 → ~32 GB. [DM-001](itds/DM-001-aggregation-topology.md)
+- **Column-block streaming within tasks** — if C grows past ~10⁸ (vector > worker RAM); topology unchanged. [DM-001](itds/DM-001-aggregation-topology.md)
+- **Deterministic tree** — if bit-identical outputs become required: canonical pairing order, drain off; tail latency rises. [DM-010](itds/DM-010-numerical-correctness.md)
+- **Kahan/compensated summation** — if value bounds widen; doubles partial size and level-0 traffic. [DM-010](itds/DM-010-numerical-correctness.md)
+- **Queue-depth autoscaling of W** — if user-set W is relaxed for cost/latency targets. [DM-008](itds/DM-008-worker-pool-w-configurability.md)
+- **Weighted fairness** — when tenants or priority classes appear; the ORDER BY generalises. [DM-007](itds/DM-007-multi-job-fairness.md)
+- **Storage lifecycle** — always-on operation: GC intermediates on completion, archive finished task rows nightly. [DM-004](itds/DM-004-queue-technology.md), [DM-005](itds/DM-005-data-placement-and-format.md)
+
+---
+
+## 5. Edge cases
 
 | Case | Behaviour | Ref |
 |---|---|---|
-| F ≤ 5 | One map task produces a partial with count = F directly; no reduce ever runs; same machinery, no special path. | DM-001 |
-| F not divisible by 5 | The remainder rides as a smaller map task; `(Σ, n)` weighting makes unequal groups correct by construction. | DM-001 |
-| Job's last partials arrive with < 5 available and nothing else running | Drain mode: reduce at fan-in 2–4 instead of waiting for a fifth that will never come; costs ≤ ~7 extra reduces (< 0.15%). | DM-002 |
-| Two workers commit a job's last two partials simultaneously | The per-job advisory lock serialises pairing; the second committer sees the first's partial and acts. | DM-002, LLD §4 |
-| Worker crashes holding a task | Lease expires ≤ 35 s; task requeued; deterministic output keys make the retry harmless. | DM-006 |
-| Worker stalls but its heartbeat thread stays alive | Absolute `TASK_DEADLINE` (300 s) stamped at claim; heartbeats cannot extend past it; reaper reclaims regardless. | DM-006 |
-| Zombie worker commits after its lease was reaped | Fenced commit (`lease_token` + `status='claimed'`) matches zero rows; the write is discarded; its earlier PUT is byte-identical to the retry's. | DM-006 |
-| Same reduce task delivered twice | Its input set was fixed at creation (partials already marked consumed), so both executions read the same inputs and write the same key. | DM-006 |
-| Duplicate `POST /jobs` | `Idempotency-Key` returns the original job; without the header a distinct job is created by design. | LLD §6 |
-| Oversized or flooding submissions | `413` above `MAX_JOB_BYTES`; `429` + `Retry-After` above `MAX_ACTIVE_JOBS`. | LLD §6 |
-| Result requested before completion | `409`; completion is announced via `job.completed` event. | LLD §6 |
-| Queue momentarily empty but job unfinished | Never read as completion — the completion rule is the count = F proof, not queue depth. | DM-003 |
-| Reaper or supervisor down | Leases expire late / W drifts: degraded, never incorrect; a backstop sweep exists purely as a bug detector. | DM-006, DM-003 |
-| Database down | System pauses; workers back off; no state is lost or corrupted. | DM-006 |
-| Object store errors | Bounded client timeouts (5 s connect / 30 s read) fail the task into the normal retry path. | DM-006 |
-| Progress bar under dynamic task creation | Coverage-based numerator over a fixed denominator estimate; monotone by construction, never reports 100% before finalize. | DM-009 |
-
----
-
-## 5. Optimizations
-
-### 5.1 In the design
-
-**Full fan-in during steady state.**
-- *Mechanism:* reduce at fan-in 5 whenever 5 partials exist; total reduce bytes scale
-  as k/(k−1), minimized at the largest legal k.
-- *Effect:* ~200 GB reduce reads at k=5 vs ~320 GB at k=2; 4× fewer tasks; half the depth.
-- → [DM-002](itds/DM-002-work-distribution-stragglers.md)
-
-**Map/reduce overlap.**
-- *Mechanism:* eager pairing lets fast workers combine finished partials while slow
-  workers are still mapping; no phase barrier exists anywhere.
-- *Effect:* a straggler delays only its own ~8 MB of work, never a phase or a branch.
-- → [DM-002](itds/DM-002-work-distribution-stragglers.md)
-
-**Task-type priority in the claim order.**
-- *Mechanism:* `finalize > reduce > map > generate` in the claim query's ORDER BY.
-- *Effect:* shortens the critical path (reduce depth), frees partial storage early,
-  and unblocks waiting users first.
-- → [DM-007](itds/DM-007-multi-job-fairness.md)
-
-**Binary intermediate format.**
-- *Mechanism:* raw float64 partials instead of text.
-- *Effect:* 2.5× smaller, zero parse cost on both the TypeScript and Python sides.
-- → [DM-005](itds/DM-005-data-placement-and-format.md)
-
-**Pairwise-structured summation.**
-- *Mechanism:* the reduction tree is pairwise summation by construction.
-- *Effect:* error O(log₅F·ε) ≈ 9×10⁻¹⁶ at F = 10⁵ — accuracy-neutral against the
-  standard single-node baseline; ~10⁴× tighter than a naive serial accumulator.
-- → [DM-010](itds/DM-010-numerical-correctness.md)
-
-### 5.2 Deferred, with triggers
-
-**Speculative re-execution of tail tasks.**
-- *Trigger:* p99 job completion > 1.5× the aggregate-throughput projection, attributed
-  to a slow-but-alive worker on the critical path.
-- *Mechanism:* duplicate the projected-last tasks; first commit wins (idempotency
-  already makes duplicates safe). Scope first to the top reduce levels where
-  duplicate I/O is cheapest.
-- *Cost:* duplicate reads (~40 MB per speculated leaf).
-- → [DM-002](itds/DM-002-work-distribution-stragglers.md)
-
-**Queue wake-up without polling.**
-- *Trigger:* measured claim latency from the 500 ms idle poll becomes material.
-- *Mechanism:* `LISTEN/NOTIFY` on task insert; drop-in.
-- → [DM-004](itds/DM-004-queue-technology.md)
-
-**Broker migration.**
-- *Trigger:* sustained > 5k tasks/s, cross-region consumers, or multi-service fan-out.
-- *Mechanism:* SQS behind the existing `QueueAdapter`, with a transactional outbox
-  replacing direct enqueue.
-- *Cost:* an outbox to build and a broker to operate; the atomic pairing transaction
-  must be re-derived.
-- → [DM-004](itds/DM-004-queue-technology.md)
-
-**Connection scaling.**
-- *Trigger:* W approaching the hundreds.
-- *Mechanism:* PgBouncer in transaction mode; workers already hold one connection each.
-- → [DM-004](itds/DM-004-queue-technology.md)
-
-**In-worker pre-combining.**
-- *Trigger:* intermediate I/O measured above ~40% of job wall-clock.
-- *Mechanism:* a worker finishing multiple maps combines locally before writing,
-  collapsing a tree level (level-0 traffic 160 GB → ~32 GB).
-- → [DM-001](itds/DM-001-aggregation-topology.md)
-
-**Column-dimension sharding.**
-- *Trigger:* C grows to where one vector (~C × 8 B) exceeds a worker's memory budget
-  (roughly C > 10⁸).
-- *Mechanism:* stream column blocks within a task; topology unchanged.
-- → [DM-001](itds/DM-001-aggregation-topology.md)
-
-**Deterministic reduction tree.**
-- *Trigger:* bit-identical outputs across runs become a requirement.
-- *Mechanism:* canonical pairing order by partial id, drain mode off.
-- *Cost:* reintroduces waiting on specific siblings; tail latency rises.
-- → [DM-010](itds/DM-010-numerical-correctness.md)
-
-**Compensated summation.**
-- *Trigger:* value bounds widen enough that O(log F·ε) error is material.
-- *Mechanism:* Kahan/Neumaier accumulators inside tasks.
-- *Cost:* doubles partial size and level-0 traffic.
-- → [DM-010](itds/DM-010-numerical-correctness.md)
-
-**Queue-depth autoscaling of W.**
-- *Trigger:* the user-set-W requirement is relaxed in favour of cost/latency targets.
-- *Mechanism:* ECS target tracking (or KEDA) on queue depth and oldest-pending age.
-- → [DM-008](itds/DM-008-worker-pool-w-configurability.md)
-
-**Weighted fairness.**
-- *Trigger:* tenants or priority classes appear.
-- *Mechanism:* the claim ORDER BY generalises to weighted fair queuing.
-- → [DM-007](itds/DM-007-multi-job-fairness.md)
-
-**Storage lifecycle.**
-- *Trigger:* always-on operation.
-- *Mechanism:* delete `inputs/` and `partials/` on job completion (config-gated);
-  archive finished task rows nightly to keep the queue table small.
-- → [DM-004](itds/DM-004-queue-technology.md), [DM-005](itds/DM-005-data-placement-and-format.md)
+| F ≤ 5 | One map yields count = F directly; no reduce runs; no special path. | DM-001 |
+| F not divisible by 5 | Remainder rides as a smaller map; (Σ, n) makes unequal groups correct. | DM-001 |
+| < 5 partials left, nothing else running | Drain mode reduces at fan-in 2–4 instead of waiting forever. | DM-002 |
+| Last two partials commit simultaneously | Per-job advisory lock serialises pairing; the second sees the first. | DM-002, LLD §4 |
+| Worker crashes holding a task | Lease expires ≤ 35 s; requeue; deterministic keys make the retry harmless. | DM-006 |
+| Worker wedged, heartbeat alive | Absolute 300 s task deadline; heartbeats cannot extend past it. | DM-006 |
+| Zombie commits after reaping | Fenced commit matches zero rows; earlier PUT is byte-identical to the retry's. | DM-006 |
+| Same reduce delivered twice | Input set fixed at creation; both runs read the same inputs, write the same key. | DM-006 |
+| Duplicate `POST /jobs` | `Idempotency-Key` returns the original job; absent it, distinct by design. | LLD §6 |
+| Oversized / flooding submissions | `413` over `MAX_JOB_BYTES`; `429` + `Retry-After` over the active-job cap. | LLD §6 |
+| Result requested early | `409`; completion announced via `job.completed`. | LLD §6 |
+| Queue empty, job unfinished | Never read as done — completion is the count = F proof, not queue depth. | DM-003 |
+| Reaper or supervisor down | Late lease expiry / W drift: degraded, never incorrect. | DM-006 |
+| Database down | System pauses; no state lost or corrupted. | DM-006 |
+| Object store errors | Bounded client timeouts fail the task into the normal retry path. | DM-006 |
+| Progress under dynamic task creation | Coverage-based and monotone; only finalize reports 100%. | DM-009 |
 
 ---
 
@@ -317,10 +214,10 @@ configuration change, not a rewrite.
 | Brief's criterion | Tier | Frozen in |
 |---|---|---|
 | F > 5: no 1:1 job↔queue item | Bare minimum | DM-001/002, LLD §2 |
-| Efficiency of task distribution | Bare minimum + Optimizations 5.1 | DM-002, DM-007 |
+| Efficiency of task distribution | Bare minimum + Optimizations | DM-002, DM-007 |
 | Deciding a job is finished | Bare minimum | DM-003 |
 | Multiple jobs concurrently | MVP | DM-007 |
-| Minimal idling, heterogeneous speeds | Bare minimum + Optimizations 5.1 | DM-002 |
+| Minimal idling, heterogeneous speeds | Bare minimum + Optimizations | DM-002 |
 | Combine worker outputs into final file | Bare minimum | DM-001, DM-010 |
 | **Bonus:** W via API | MVP | DM-008 |
 | **Bonus:** live UI | MVP | DM-009 |

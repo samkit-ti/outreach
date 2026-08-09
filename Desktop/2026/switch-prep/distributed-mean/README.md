@@ -48,7 +48,7 @@ race the chosen design against its rejected alternatives (same seed, same worker
 
 1. `00-problem-statement.md` — the brief, verbatim
 2. `01-requirements-and-assumptions.md` — FR/NFR, assumptions A-1…A-9, envelope + service-time model
-3. `04-decision-journey.md` — every decision by delivery tier (Scope → Bare minimum → MVP → Edge cases → Optimizations), question-framed with proofs and refs
+3. `04-decision-journey.md` — the decision index: question → chosen answer (one-line reasoning) → alternatives (one line each), tiered Scope → Bare minimum → MVP → Optimizations → Edge cases
 4. `02-hld.md` — architecture, diagrams, why-not-Spark, failure modes, AWS story
 5. `03-lld.md` — schema, claim SQL, the three transactions, worker loop, API spec, runbook
 6. `itds/` — one decision record per load-bearing choice:

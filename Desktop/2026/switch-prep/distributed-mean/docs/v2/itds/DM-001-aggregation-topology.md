@@ -30,8 +30,15 @@ Constraints that bind this decision:
   **exactly the same shape and size as an input file (8 MB)**. So a reduce step that combines
   partials is subject to the same ≤5 constraint as a map step over files. This single
   observation is what makes aggregation *recursive*: combining 20,000 partials 5-at-a-time
-  needs ⌈log₅ 20,000⌉ = **7 levels** and **≈5,000 reduce tasks**. Total: **≈25k compute tasks
-  + ≈2k `generate` tasks per max job** (D9 — input generation is itself distributed).
+  needs ⌈log₅ 20,000⌉ = **7 levels** and **≈5,000 reduce tasks**. Total: **≈25k tasks per max
+  job** — 20,000 `map` + ≈5,000 `reduce` + 1 `finalize`.
+- **The inputs already exist; we never generate them.** `POST /jobs` carries an explicit
+  `inputUris[]` naming F pre-existing model-weight vectors that live on the nodes and are
+  exposed at S3-API URIs (F is the list length; C is declared at submit and validated at
+  read). Reads are permitted only for URIs on an allow-listed set of buckets/hosts
+  (`INPUT_URI_ALLOWLIST`). Because the URI list is known at submit, T1 creates **all** ⌈F/5⌉
+  `map` tasks inside the submit transaction, chunked by `K_FANIN` in list order — there is no
+  dynamic map spawn.
 - **Workers process files at different speeds** (given in the brief). Any structure with a
   synchronisation point converts the slowest worker into the job's clock.
 - **Multiple jobs run concurrently** (critical aspect #4 in the brief), so no per-job singleton process may
@@ -152,8 +159,8 @@ Instead of (or in addition to) splitting on F, split on C: task *j* handles colu
   exactly zero and the F-dimension tree is still required — this is additive work, not a
   replacement.
 - Multiplies task count by S (20,000 × S) without removing a single reduce level.
-- **S× read amplification.** Input is line-oriented CSV (D6), so reaching a column range means
-  scanning the file to that line; each of the F files is re-read once per shard, turning
+- **S× read amplification.** Where input is line-oriented CSV (D6), reaching a column range
+  means scanning the file to that line; each of the F files is re-read once per shard, turning
   800 GB of reads into S × 800 GB.
 - `finalize` must stitch S shards into one ordered result file, adding a join step.
 - At the current envelope it buys nothing: a full C = 1M vector is 8 MB, which is not a memory
@@ -177,7 +184,8 @@ done.
 - Cannot exploit early-finishing siblings: five ready partials belonging to different planned
   groups must still wait for their planned peers. Tail groups (F % 5 ≠ 0) are likewise fixed at
   plan time, so the tail is as slow as planned rather than as slow as observed.
-- ~25k rows written up front per job, before we know the job will not be cancelled.
+- The ≈5,000 reduce rows and the whole edge set are written up front, on top of the 20,000
+  `map` rows T1 already creates, before we know the job will not be cancelled.
 
 *(The eager-vs-static comparison is the substance of D3 and is argued in full in DM-002; it is
 listed here because it is a genuine topology alternative, not only a scheduling one.)*
@@ -186,13 +194,14 @@ listed here because it is a genuine topology alternative, not only a scheduling 
 
 ## Chosen: Recursive eager 5-ary reduction through the queue, on `(sum, count)` partials
 
-**The decision.** `map` tasks read ≤5 input files and emit a partial carrying
-`(sum_vector, count)`. `reduce` tasks read 2–5 partials and emit one partial with the
-element-wise sum and the summed count. Reduce tasks are enqueued eagerly as soon as enough
-unconsumed partials exist (D3 → DM-002). Division happens **exactly once**, in `finalize`,
-when a single partial with `count == F` remains. At F = 100k, C = 1M this is **20,000 leaf
-`map` tasks, ≈5,000 `reduce` tasks across ~7 levels**, plus ≈2k `generate` tasks and one
-`finalize`.
+**The decision.** `map` tasks read ≤5 pre-existing input vectors — node-owned model weights
+fetched from allow-listed URIs — and emit a partial carrying `(sum_vector, count)`. `reduce`
+tasks read 2–5 partials and emit one partial with the element-wise sum and the summed count.
+All ⌈F/5⌉ `map` tasks are created in the submit transaction, chunked from `inputUris[]` in list
+order; reduce tasks are enqueued eagerly as soon as enough unconsumed partials exist
+(D3 → DM-002). Division happens **exactly once**, in `finalize`, when a single partial with
+`count == F` remains. At F = 100k, C = 1M this is **20,000 leaf `map` tasks, ≈5,000 `reduce`
+tasks across ~7 levels**, plus one `finalize` — **≈25k tasks**.
 
 **Positive case — three properties, not just the absence of problems:**
 
@@ -200,7 +209,10 @@ when a single partial with `count == F` remains. At F = 100k, C = 1M this is **2
    commutatively, which is what lets *any* free worker combine *any* two partials the instant
    both exist. That algebraic freedom is the scheduling freedom the brief's "workers process
    files at different speeds" requirement needs — the topology and the straggler answer are
-   the same design, not two.
+   the same design, not two. The same monoid is also the evolution path to **weighted FedAvg**:
+   `(Σ, n)` generalises to `(Σwᵢ·xᵢ, Σwᵢ)` with the topology unchanged and the partial payload
+   8 bytes larger — a one-line change to the accumulator, not built here because the mean this
+   job computes is unweighted.
 
 2. **Passing means instead is not a style choice, it is a correctness bug.** With F = 12 and
    K = 5 the groups are 5, 5, 2. Take ten files of 0.0 and two files of 1.0 at some index. The
@@ -268,7 +280,7 @@ when a single partial with `count == F` remains. At F = 100k, C = 1M this is **2
 |-----------|--------|--------------|
 | Correctness with unequal groups | F = 12 fixture (ten 0.0 files, two 1.0 files), max abs error vs single-node numpy oracle ≤ 1e-15 | Integration test asserting against `numpy.mean(axis=0)` |
 | No mean-of-means regression | The same F = 12 fixture fails loudly (≥0.16 error) if a partial ever carries a mean | Design-guard / negative test on the partial schema |
-| Task-graph shape at max job | F = 100k, C = 1M → 20,000 `map`, ≈5,000 `reduce`, 7 levels, ≈2k `generate`, 1 `finalize` | `SELECT type, count(*) FROM tasks GROUP BY type`; level from reduce depth column |
+| Task-graph shape at max job | F = 100k, C = 1M → 20,000 `map`, ≈5,000 `reduce`, 7 levels, 1 `finalize` (≈25k total) | `SELECT type, count(*) FROM tasks GROUP BY type`; level from reduce depth column |
 | Map/reduce overlap (no barrier) | First `reduce` task claimed strictly before the last `map` task completes | `events` table timestamps (D11) |
 | Bounded intermediate storage | Peak unconsumed partials per job ≤ 5·W + 5 (never the 20,000-partial / 160 GB set) | Sampled `SELECT count(*) FROM partials WHERE consumed_by IS NULL` |
 | No single-node bottleneck | No host carries > 5% of total partial bytes for a job | Per-worker byte counters in the `events` stream |

@@ -14,7 +14,9 @@ CREATE TYPE job_status  AS ENUM ('pending','running','finalizing','completed','f
 CREATE TYPE task_status AS ENUM ('pending','claimed','done','dead');
 -- There is no transient 'failed' task state: a retryable failure IS a requeue to
 -- 'pending' (T4), so failure and redelivery share one code path (DM-006).
-CREATE TYPE task_type   AS ENUM ('generate','map','reduce','finalize');
+CREATE TYPE task_type   AS ENUM ('map','reduce','finalize');
+-- Three types. Inputs pre-exist at node-owned URIs (00 §Setting, 01 A-2), so there is
+-- no generation task and no task type that creates data.
 
 CREATE TABLE jobs (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -35,27 +37,31 @@ CREATE TABLE tasks (
   job_id        UUID NOT NULL REFERENCES jobs(id),
   type          task_type   NOT NULL,
   status        task_status NOT NULL DEFAULT 'pending',
-  priority      SMALLINT    NOT NULL,          -- finalize=0 < reduce=1 < map=2 < generate=3
+  priority      SMALLINT    NOT NULL,          -- finalize=0 < reduce=1 < map=2
   CHECK (priority = CASE type WHEN 'finalize' THEN 0 WHEN 'reduce' THEN 1
-                              WHEN 'map'      THEN 2 WHEN 'generate' THEN 3 END),
+                              WHEN 'map'      THEN 2 END),
                                                -- makes the ASC/DESC footgun unrepresentable:
-                                               -- priority is a function of type, not a free field
+                                               -- priority is a function of type, not a free field.
+                                               -- The CASE is exhaustive over task_type, so a new
+                                               -- type cannot be inserted without pricing it
   payload       JSONB       NOT NULL,          -- see §2 (URIs + params only, < 1 KB)
   attempts      SMALLINT    NOT NULL DEFAULT 0,
   max_attempts  SMALLINT    NOT NULL DEFAULT 3,  -- finalize rows are seeded with 10 (§4 T3)
   worker_id     TEXT,
   lease_token   UUID,                          -- per-claim fencing token (DM-006)
   claimed_at    TIMESTAMPTZ,                   -- set by the claim query from the DB's now()
-  deadline_at   TIMESTAMPTZ,                   -- claimed_at + the per-type deadline (§8);
+  deadline_at   TIMESTAMPTZ,                   -- claimed_at + TASK_DEADLINE_SECONDS (§8);
                                                -- absolute, never extended by a heartbeat
   lease_expires_at TIMESTAMPTZ,
-  last_error    TEXT,                          -- last executor exception, recorded by T4
-  dedupe_key    TEXT,                          -- natural key for generate-spawned map tasks
-                                               -- ('map:{jobId}:{fileIdxFrom}', a pure function
-                                               -- of the generate range chunked by K_FANIN)
-                                               -- ONLY. reduce has no natural key: its dedupe
-                                               -- comes from the consumed-guard; finalize's
-                                               -- from the running→finalizing CAS (DM-006)
+  last_error    TEXT,                          -- last executor exception, recorded by T4;
+                                               -- carries the offending input URI when a
+                                               -- map task dies on an unreadable input
+                                               -- There is no dedupe_key column: no task type
+                                               -- spawns another, so no natural key is needed.
+                                               -- map tasks are created exactly once, inside
+                                               -- T1's single transaction; reduce dedupe comes
+                                               -- from the consumed-guard, finalize's from the
+                                               -- running→finalizing CAS (DM-006)
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at   TIMESTAMPTZ
 );
@@ -64,7 +70,6 @@ CREATE INDEX idx_tasks_claim ON tasks (status, priority, created_at) WHERE statu
 CREATE INDEX idx_tasks_lease ON tasks (lease_expires_at) WHERE status = 'claimed';
 CREATE INDEX idx_tasks_inflight ON tasks (job_id) WHERE status = 'claimed';  -- the inflight CTE
 CREATE INDEX idx_tasks_job   ON tasks (job_id, status);
-CREATE UNIQUE INDEX idx_tasks_dedupe ON tasks (dedupe_key) WHERE dedupe_key IS NOT NULL;
 
 CREATE TABLE partials (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -124,23 +129,26 @@ Invariants (enforced by transactions in §4):
 
 ```ts
 type TaskPayload =
-  | { kind: 'generate'; jobId: string; fileIdxFrom: number; fileIdxTo: number; c: number; seedBase: string }
-  | { kind: 'map';      jobId: string; fileIdxFrom: number; fileIdxTo: number;   // ≤5 files, inclusive
-                        inputUris: string[] /* ≤5 */; c: number }
+  | { kind: 'map';      jobId: string; inputUris: string[] /* ≤5 */; c: number }
   | { kind: 'reduce';   jobId: string; partialIds: string[] /* 2–5 */; partialUris: string[]; c: number }
   | { kind: 'finalize'; jobId: string; partialUri: string; f: number; c: number };
 ```
 
-`map` carries its **file-index range**, not just URIs, because that range is what makes the
-task's identity computable: `dedupe_key = 'map:{jobId}:{fileIdxFrom}'`. The ranges are the
-spawning `generate` task's own `fileIdxFrom..fileIdxTo` chunked by `K_FANIN`, so a retried
-`generate` spawn derives byte-identical keys and conflicts away — a spawn-time counter would
-not, and would mint duplicate map tasks whose extra partials push a job's total count past F
-(DM-006). `inputUris` is not free-form either: it is the single key layout of §7 applied to
-that range, `jobs/{jobId}/inputs/{fileIdx}.csv` for `fileIdx` in `fileIdxFrom..fileIdxTo`,
-held as one shared constant (`INPUT_KEY(jobId, fileIdx)`) that the API, the generate branch of
-T2, and the worker's `BlobStore` all use. Whoever computes a URI computes it from that
-constant; see §4 T2 for the branch that does it.
+**A map task's `inputUris` *are* its identity**, which is why no `dedupe_key` exists. The
+URIs are user-supplied at submit and are not derivable from any template of ours — the input
+objects live on the nodes that produced them (01 A-2), under whatever keys those nodes chose.
+T1 slices the submitted `inputUris[]` into ⌈F/5⌉ contiguous `K_FANIN`-sized chunks **in list
+order** and writes one map row per chunk inside its single transaction (§4 T1), so the
+mapping from submitted list to map tasks is total, disjoint, and created exactly once: a
+transaction either commits every map row or none. There is no spawn path, hence no duplicate
+map task to dedupe and no natural key to compute (DM-006).
+
+Every URI a worker reads is checked against `INPUT_URI_ALLOWLIST` (§8) — at submit by the API
+and again at read by the worker's `BlobStore`, because the object behind a URI can change
+between the two. Reading also validates C: byte length must equal `c × 8` for a `.f64` object,
+or the line count must equal `c` for a `.csv` one (§7). A mismatch is a permanent error, not a
+transient one — it still travels T4's normal path and consumes its three attempts, because
+retrying costs seconds and special-casing permanence costs a branch.
 
 ## 3. The claim query (queue + fairness in one statement)
 
@@ -160,7 +168,7 @@ candidate AS (
   WHERE t.status = 'pending'
   ORDER BY
     COALESCE(i.n, 0),                                -- fairness: least-served job first
-    t.priority ASC,                                  -- finalize=0 first … generate=3 last
+    t.priority ASC,                                  -- finalize=0 first … map=2 last
     t.created_at                                     -- FIFO tiebreak
   LIMIT 16                                           -- ≈ceil(W_max/2): see the note below
   FOR UPDATE OF t SKIP LOCKED
@@ -169,9 +177,9 @@ UPDATE tasks t SET status='claimed', worker_id=$1, attempts=attempts+1,
                  lease_token = gen_random_uuid(),
                  claimed_at  = now(),
                  lease_expires_at = now() + interval '30 seconds',
-                 deadline_at = now() + make_interval(secs =>       -- per-type ceiling (§8),
-                   CASE t.type WHEN 'generate' THEN $2             -- read off the row's own
-                               ELSE $3 END)                        -- type, not the caller's guess
+                 deadline_at = now() + make_interval(secs => $2)   -- absolute ceiling (§8):
+                                                                   -- TASK_DEADLINE_SECONDS,
+                                                                   -- flat across all three types
 WHERE t.id = (SELECT id FROM candidate LIMIT 1)       -- one task per claim, still
 RETURNING t.id, t.type, t.payload, t.lease_token, t.deadline_at;
 ```
@@ -179,9 +187,11 @@ RETURNING t.id, t.type, t.payload, t.lease_token, t.deadline_at;
 **All lease and deadline arithmetic uses the DB's `now()`; workers never send timestamps.**
 `claimed_at`, `deadline_at`, and `lease_expires_at` are written by the statements above and by
 the heartbeat below, all server-side, so worker clock skew cannot lengthen a lease or move a
-deadline. The only worker-supplied numbers are `$2`/`$3` — the `TASK_DEADLINE_SECONDS` config
-constants (§8), not clock readings — and the row's own `type` selects between them, so a
-claimer cannot mis-deadline a task by mispredicting what it will get.
+deadline. The only worker-supplied number is `$2` — the `TASK_DEADLINE_SECONDS` config
+constant (§8), not a clock reading. The ceiling is flat because all three surviving types do
+comparable work (§8); should a heavier type ever be added, this expression becomes a
+`CASE t.type …` reading the ceiling off the row's own type rather than the caller's guess —
+a config-shaped change, not a redesign (DM-006).
 
 Notes:
 - All transactions run at **READ COMMITTED** (Postgres default) — deliberate: every
@@ -218,28 +228,47 @@ Notes:
 ### T1 — job submission (API)
 
 ```
+-- Pre-transaction validation (zod at the edge, §6):
+--   inputUris is a non-empty array; F := inputUris.length, 2 ≤ F ≤ 99999
+--   every URI parses and its bucket/host is in INPUT_URI_ALLOWLIST → else 422
+--   no duplicate URIs (a repeated URI would double-weight that vector) → else 422
+--   reject 413 if F×C×8 > MAX_JOB_BYTES; 429 + Retry-After if active ≥ MAX_ACTIVE_JOBS
+
 BEGIN;
-  -- admission control (v2): reject 413 if F×C×8 > MAX_JOB_BYTES;
-  -- 429 + Retry-After if active jobs ≥ MAX_ACTIVE_JOBS
   INSERT INTO jobs (f, c, idempotency_key) VALUES ($f, $c, $key)
     ON CONFLICT (idempotency_key) DO NOTHING
-    RETURNING id;                                    -- v2: retried POST returns the
-                                                     --     original job, never a twin
+    RETURNING id;                                    -- a retried POST returns the
+                                                     -- original job, never a twin
   IF 0 rows:                                         -- the key already exists
     SELECT id FROM jobs WHERE idempotency_key=$key;   -- the original
     COMMIT; return 200 {jobId}                        -- no new tasks, no new events
-  -- seed generate tasks in batches of GEN_BATCH=50 files
-  INSERT INTO tasks (job_id, type, priority, payload) SELECT … ;  -- ⌈F/50⌉ rows
+
+  -- ALL map tasks, now: slice inputUris into ⌈F/K_FANIN⌉ contiguous chunks in LIST ORDER
+  INSERT INTO tasks (job_id, type, priority, payload)
+    VALUES ($jobId, 'map', 2,
+            {kind:'map', jobId: $jobId, c: $c, inputUris: <chunk>})   -- one row per chunk
+    …;                                               -- ⌈F/5⌉ rows: 200 at F=1000,
+                                                     -- 20,000 at the max job
   UPDATE jobs SET status='running' WHERE id=$jobId;
   INSERT INTO events (type, job_id, payload) VALUES ('job.submitted', …);
 COMMIT;
 ```
 
-Transactional enqueue: job row and its seed tasks are atomic — no half-submitted jobs
+**The whole map frontier is created here, in one transaction, and nowhere else.** That is
+affordable precisely because the inputs already exist: their URIs are known at submit, so the
+partition of the F inputs into ⌈F/5⌉ chunks is a pure function of the submitted list and needs
+no observation of anything that has run. 20,000 rows at the max job is a single bulk `INSERT`
+of < 20 MB of JSONB — milliseconds, against a job that will take hours of worker time. Two
+consequences worth naming: **there is no dynamic map spawn anywhere in the system** (which is
+why §1 has no `dedupe_key` — a transaction commits every map row or none, so a duplicate map
+task is unrepresentable, DM-006), and **INV-1 holds from the first commit**: every one of the
+F inputs is covered by exactly one map task before any worker claims anything.
+
+Transactional enqueue: job row and its map tasks are atomic — no half-submitted jobs
 (DM-004). `jobs.idempotency_key` is nullable and uniquely indexed only where non-null
-(§1), so without the header duplicate submission creates a distinct job by design, since F
-and C carry no identity. The 0-row path must *select* the original id, not infer it: the
-conflicting row was written by an earlier request whose id this one never saw.
+(§1), so without the header duplicate submission creates a distinct job by design, since the
+URI list carries no identity of its own. The 0-row path must *select* the original id, not
+infer it: the conflicting row was written by an earlier request whose id this one never saw.
 
 ### T2 — task completion + eager pairing (worker; the heart of the system)
 
@@ -252,18 +281,8 @@ BEGIN;
   -- 0 rows → lease was reaped & task reassigned (zombie worker) → ROLLBACK, discard.
   -- The PUT already done is harmless: deterministic key, byte-identical content.
 
-  IF task.type = 'generate':
-    -- This branch computes the payloads of the map tasks it spawns. Nothing else does.
-    -- For each ≤K_FANIN chunk of this task's own fileIdxFrom..fileIdxTo:
-    INSERT INTO tasks (job_id, type, priority, payload, dedupe_key)
-      VALUES ($jobId, 'map', 2,
-              {kind:'map', jobId, fileIdxFrom: chunkFrom, fileIdxTo: chunkTo, c,
-               inputUris: [INPUT_KEY($jobId, i) for i in chunkFrom..chunkTo]},
-              'map:' || $jobId || ':' || chunkFrom)
-      ON CONFLICT (dedupe_key) DO NOTHING;           -- a retried generate re-derives the
-                                                     -- identical keys and inserts nothing
-    -- inputUris come from the ONE key layout (§2, §7); the chunk boundaries are this
-    -- task's range divided by K_FANIN, so they are a pure function of the payload.
+  -- No branch inserts a map task: T1 created every one of them (§4 T1). This transaction
+  -- only ever ADDS a partial and, from it, at most one reduce or finalize task.
 
   IF task.type IN ('map','reduce'):
     INSERT INTO partials (job_id, uri, count, produced_by) VALUES (…)
@@ -348,9 +367,10 @@ requeued = UPDATE tasks
                                       -- token can never match a future state
  WHERE status='claimed'
    AND (lease_expires_at < now()
-        OR now() > deadline_at)       -- absolute per-type deadline, stamped at claim
-                                      -- time (§3): reclaims wedged-but-heartbeating
-                                      -- holders (DM-006)
+        OR now() > deadline_at)       -- absolute deadline, stamped at claim time (§3):
+                                      -- reclaims wedged-but-heartbeating holders,
+                                      -- including a map task hung on an unreachable
+                                      -- input URI (DM-006)
  RETURNING id, job_id, status;
 -- attempts is incremented at CLAIM time only (T-claim); the CASE above reads the
 -- already-incremented value. Incrementing here too would double-count.
@@ -407,9 +427,9 @@ it to `finalizing` and re-enqueue.
 
 ### T4 — executor failure (worker)
 
-An exception inside `execute()` — a blob GET that raised after its bounded retries, a
-malformed input, a bug — is not a lost lease and must not wait for one. The worker requeues
-its own task, fenced identically to T2:
+An exception inside `execute()` — a blob GET that raised after its bounded retries, an input
+URI that is missing or holds the wrong number of values, a bug — is not a lost lease and must
+not wait for one. The worker requeues its own task, fenced identically to T2:
 
 ```
 UPDATE tasks
@@ -425,7 +445,9 @@ backoff timer, which is why `task_status` has no `'failed'` value (§1). The cla
 fairness ordering supplies the spacing a backoff would: a requeued task re-enters at the
 back of its job's FIFO tiebreak, and its job's `inflight` count no longer includes it, so
 another job's work is served in between. Recording `last_error` on the row keeps the cause
-attached to the thing that failed rather than in a log line nobody correlates. A task that
+attached to the thing that failed rather than in a log line nobody correlates — and it is the
+one place an operator learns *which* input URI was unreadable, so the message includes the URI
+verbatim and, on a length mismatch, both the declared C and the length found. A task that
 reaches `attempts >= max_attempts` here goes straight to `dead` and is picked up by T3's
 job-failure statement on its next pass — with T3's guards, so a `dead` finalize on a job
 that still holds its `count == F` partial raises `job.needs_finalize` instead of failing it.
@@ -447,16 +469,14 @@ classDiagram
         <<dispatch on payload.kind>>
         +execute(task) TaskResult
     }
-    class GenerateExec { +run() "seeded RNG → PUT csv files" }
-    class MapExec      { +run() "GET ≤5 csv → np.sum(axis=0) → PUT f64" }
+    class MapExec      { +run() "GET ≤5 inputs (csv or f64, validate C) → np.sum(axis=0) → PUT f64" }
     class ReduceExec   { +run() "GET 2–5 f64 → vector add → PUT f64" }
     class FinalizeExec { +run() "GET f64 → ÷F → PUT result.csv" }
-    class BlobStore    { +get(uri) bytes; +put(uri, bytes) "S3 API: MinIO/S3" }
+    class BlobStore    { +get(uri) bytes; +put(uri, bytes) "S3 API: MinIO/S3 — reads allow-listed only, writes job-prefixed" }
     class Committer    { +commit_done(task, outputs) "T2 incl. eager pairing" ; +commit_failed(task, err) "T4" }
 
     WorkerMain --> TaskClaimer
     WorkerMain --> Executor
-    Executor <|-- GenerateExec
     Executor <|-- MapExec
     Executor <|-- ReduceExec
     Executor <|-- FinalizeExec
@@ -494,6 +514,18 @@ T2 opens: once execution is done there is nothing left to keep a lease alive for
 heartbeat racing a fenced commit can only extend a lease the commit is about to retire. Pool
 sizing follows from this: `2W` worker connections plus the API's pool (§8).
 
+**`MapExec` and the two guards on `BlobStore`.** A map task's inputs are objects we do not own,
+named by URIs the user supplied, so `BlobStore.get` is the trust boundary: it refuses any URI
+whose bucket/host is not in `INPUT_URI_ALLOWLIST` (§8) — re-checked here and not only at submit,
+because the API's check and the read are separated in time — and it applies the bounded
+connect/read timeouts of §8 so an unreachable node fails the task instead of hanging it.
+`MapExec` then sniffs the format by extension (`.f64` → `np.frombuffer`, `.csv` → one value per
+line) and **validates C before adding anything**: `len(bytes) == c × 8` for `.f64`, line count
+`== c` for `.csv`. A mismatch raises, which is T4's path — the retry cannot succeed, but it
+costs seconds and buys a uniform failure route. `BlobStore.put` is guarded in the other
+direction: writes are rejected outside `jobs/{jobId}/`, so nothing we compute can land on a
+node's input keys.
+
 Execution discipline that makes everything else true:
 - **Execute is side-effect-free except deterministic PUTs.** Output keys are
   deterministic functions of the task's *inputs*: partials at
@@ -510,7 +542,7 @@ Execution discipline that makes everything else true:
 
 | Method & path | Req | Resp | Notes |
 |---|---|---|---|
-| `POST /jobs` | `{f, c, inputUris?}` + `Idempotency-Key?` header | `202 {jobId}` \| `413` too large \| `429` too many active | T1. `inputUris[]` (length F) skips generation and seeds `map` directly — exists so the brief's own F=2 example is a first-class test |
+| `POST /jobs` | `{inputUris, c}` + `Idempotency-Key?` header | `202 {jobId}` \| `413` too large \| `422` bad/duplicate/non-allow-listed URI \| `429` too many active | T1. **`inputUris[]` is the job**: F = its length, and T1 chunks it in list order into every `map` task. Each URI is validated against `INPUT_URI_ALLOWLIST` at submit and again at read (§5) |
 | `GET /jobs` | `?limit=50&cursor=` | `[{id,f,c,status,progress,…}]` | keyset pagination on `(created_at,id)` |
 | `GET /jobs/:id` | — | `{status, progress, counts:{pending,claimed,done}, error?}` | progress = coverage (below) |
 | `GET /jobs/:id/result` | — | `302` → 15-min pre-signed GET \| `?inline=1` streams \| `409` until `completed` | keeps the API off the data plane (DM-005 owns this decision) |
@@ -520,8 +552,13 @@ Execution discipline that makes everything else true:
 
 **API conventions (v2):** request validation with zod at the edge, mirroring the DDL
 CHECKs; error bodies `{error:{code,message,details}}`; `400` malformed / `422`
-out-of-range / `409` result-not-ready / `413` job too large (`F×C×8 > MAX_JOB_BYTES`) /
-`429` too many active jobs (with `Retry-After`). Completion is discovered via the
+out-of-range or an input URI that is unparseable, duplicated, or outside
+`INPUT_URI_ALLOWLIST` (the `details` field names the offending URI) / `409`
+result-not-ready / `413` job too large (`F×C×8 > MAX_JOB_BYTES`) / `429` too many active
+jobs (with `Retry-After`). Note what is deliberately *not* validated at submit: whether
+each object exists and holds C values. That would be F HEADs — 100k round-trips on the
+submit path, exactly the serialization the design refuses — so existence and length are
+checked at read, where the failure has a retry path and an owner (§5, T4). Completion is discovered via the
 `job.completed` SSE event or polling `GET /jobs/:id`; webhooks are out of scope (no
 authenticated caller to sign to). "Jobs queued" (bonus metric) = running jobs with ≥1
 pending task and 0 in flight. Cancellation is out of scope for v1/v2 but designed:
@@ -539,31 +576,41 @@ the bar would move backwards.
 
 ## 7. Object store layout & file formats
 
+**Inputs are external.** They live on the nodes that produced them, under keys those nodes
+chose, and are never under `jobs/{jobId}/`. We hold their URIs, read them, and write nothing
+back:
+
 ```
-bucket: distributed-mean
-  jobs/{jobId}/inputs/{fileIdx}.csv          # one float per line ("0.7391824…\n")
+INPUT (external, node-owned, read-only, allow-listed)
+  s3://<node-bucket>/<whatever-the-node-chose>.f64   # raw little-endian float64 × C
+  s3://<node-bucket>/<whatever-the-node-chose>.csv   # one value per line, C lines
+
+OUR bucket: distributed-mean
   jobs/{jobId}/partials/{taskId}.f64         # raw little-endian float64 × C; metadata: x-amz-meta-count
   jobs/{jobId}/result.csv                    # one float per line, C lines
 ```
 
-- CSV inputs: human-readable, satisfies "format of your choice", demo-friendly.
+- **Input format is not ours to choose — only what we accept is.** Both `.f64` (raw
+  little-endian float64) and `.csv` (one value per line) are read, sniffed by extension, and
+  validated against the declared C at read (byte length `= C×8`, or line count `= C`). Nothing
+  else is accepted; an unknown extension fails the task like any other bad input (§5, DM-005).
 - `.f64` partials: 8 MB vs ~20 MB CSV; `np.frombuffer` / Node `DataView` read it with
   zero parsing (DM-005). `count` lives in the partials row (authoritative) and object
-  metadata (debug).
-- GC: on job completion, `inputs/` and `partials/` deleted async (config-gated so the
-  demo can keep them for inspection). The same pass deletes the job's `partials` rows —
-  including the root partial, whose `consumed_by` stays NULL forever because `finalize`
-  reads it rather than consuming it into another partial. It is the one row the
-  `idx_partials_avail` index would otherwise accumulate per completed job.
+  metadata (debug). Result stays CSV — human-readable, mirroring the brief's example.
+- GC: on job completion, `partials/` is deleted async (config-gated so the demo can keep it
+  for inspection). Inputs are **never** GC'd — they are not ours. The same pass deletes the
+  job's `partials` rows — including the root partial, whose `consumed_by` stays NULL forever
+  because `finalize` reads it rather than consuming it into another partial. It is the one row
+  the `idx_partials_avail` index would otherwise accumulate per completed job.
 
 ## 8. Configuration
 
 | Var | Default | Meaning |
 |---|---|---|
-| `K_FANIN` | 5 | the RAM constraint; single source of truth |
-| `GEN_BATCH` | 50 | files per generate task |
+| `K_FANIN` | 5 | the RAM constraint; single source of truth. Also the chunk size T1 slices `inputUris[]` by |
+| `INPUT_URI_ALLOWLIST` | (demo: the MinIO host) | buckets/hosts a worker may READ inputs from. User-supplied URIs are checked against it at submit and again at read; writes are independently confined to `jobs/{jobId}/` (§5, HLD §9) |
 | `LEASE_SECONDS` / `HEARTBEAT_SECONDS` / `REAPER_SECONDS` | 30 / 10 / 5 | liveness; worst-case crash detection 35 s (DM-006) |
-| `TASK_DEADLINE_SECONDS` | `{map:300, reduce:300, finalize:300, generate:1800}` | absolute per-task ceiling, stamped as `deadline_at` at claim time — heartbeats can't extend past it; reclaims wedged-but-heartbeating workers (DM-006). **Per-type because the types are not comparable:** a `map` moves ~108 MB (~2.2 s), so 300 s is ~135× headroom; a `generate` batch writes 50 × ~20 MB ≈ 1,000 MB, ~20 s at the 50 MB/s model and ~200 s on a 10× straggler — 300 s would reap healthy generate tasks under exactly the heterogeneity NFR-2 demands we tolerate |
+| `TASK_DEADLINE_SECONDS` | 300 | absolute per-task ceiling, stamped as `deadline_at` at claim time — heartbeats can't extend past it; reclaims wedged-but-heartbeating workers (DM-006). **Flat, because the three types now do comparable work:** the heaviest is a `map` moving ~108 MB (~2.2 s), so 300 s is ~135× headroom and still ~13× on a 10× straggler. The claim query reads the ceiling from config, not from the row's type, so per-type ceilings return as a `CASE` the day a heavier type is added (§3, DM-006) |
 | DB connections per worker | 2 | one for claim/execute/commit (T2 is a multi-statement txn), one dedicated to the heartbeat thread (libpq is not thread-safe per connection) — §5 |
 | DB pool sizing | `2W + API pool (10)` | at W_max=32: 74 connections; past that, PgBouncer (DM-004) |
 | `MAX_JOB_BYTES` / `MAX_ACTIVE_JOBS` | 50 GB local (5 GB demo) / 8 | admission control; unset on AWS |
@@ -583,20 +630,26 @@ services:
   ui:            static site served by api (or nginx)  — SSE client
 ```
 
-**Runbook (v2):** `make up` (compose up + node-pg-migrate applied by the API on boot +
-`mc mb` init container creates the bucket) · `make demo F=1000 C=100000` (284 tasks:
-20 generate + 200 map + 63 reduce + 1 finalize ≈ 630 worker-seconds ≈ **2.6 min at W=4**,
-per the service-time model in 01 §4) · `make chaos` (demo + kill a busy worker) ·
-`make test`. Why Postgres and not SQLite for a laptop demo: SQLite has no
+**Runbook:** `make up` (compose up + node-pg-migrate applied by the API on boot + `mc mb` init
+container creates our bucket) · `make seed F=1000 C=100000` (**harness, not a system feature**:
+writes F fixture weight vectors into a MinIO bucket standing in for the nodes' storage, then
+prints their URIs) · `make demo F=1000 C=100000` (seeds if needed, then `POST /jobs` with those
+`inputUris` — **264 tasks: 200 map + 63 reduce + 1 finalize ≈ 580 worker-seconds ≈ 2.4 min at
+W=4**, per the service-time model in 01 §4) · `make chaos` (demo + kill a busy worker) ·
+`make test`. The seeder writes to a bucket that is *in* `INPUT_URI_ALLOWLIST` and *not* the
+bucket our workers write to, so the demo exercises the real read/write asymmetry rather than
+a self-owned shortcut. Why Postgres and not SQLite for a laptop demo: SQLite has no
 `SKIP LOCKED`, a single writer, no `LISTEN/NOTIFY`, and RDS is the deployment target —
 the demo must exercise the same concurrency the design argues about.
 
 ## 10. Test & demo plan (maps to §6 success criteria of 01-requirements)
 
-1. **Correctness:** `pytest` — golden test: F=7,C=10 vs numpy reference (exercises
-   F%5≠0 → drain-mode fan-in 2); `test_prompt_example`: F=2,C=3 with `inputUris`
-   pointing at [1,2,3] and [4,5,6] → asserts exactly [2.5, 3.5, 4.5]; property test:
-   random F,C ≤ 100 vs reference, 1e-9 rel.
+1. **Correctness:** `pytest` — `test_prompt_example` is now simply *the main path*: F=2, C=3,
+   `inputUris` pointing at two fixture files holding [1,2,3] and [4,5,6] → asserts exactly
+   [2.5, 3.5, 4.5]. Golden test: F=7, C=10 vs numpy reference (exercises F%5≠0 → drain-mode
+   fan-in 2); mixed-format test: the same job with half the inputs `.csv` and half `.f64`
+   returns the identical vector; property test: F,C ≤ 100 over random fixture vectors vs
+   reference, 1e-9 rel.
 2. **Unit:** eager-pairing under concurrent committers with the interleaving *pinned*:
    two explicit DB connections, a `pg_sleep` injected between one committer's partial
    INSERT and its pairing step, asserting the other blocks on the advisory lock and
@@ -611,3 +664,8 @@ the demo must exercise the same concurrency the design argues about.
    count ≈ proportional, total idle time ≈ 0 while eligible tasks exist.
 5. **Fairness demo:** submit F=5000 job, then F=8 job 5 s later → F=8 completes far
    earlier (claim-order round-robin), both progress concurrently in UI.
+6. **Bad-input tests:** (a) an `inputUris` entry outside `INPUT_URI_ALLOWLIST` → `422` at
+   submit, no job row, no tasks; (b) an allow-listed URI whose object does not exist → the map
+   task retries three times and goes `dead`, the job goes `failed`, and `last_error` names that
+   URI; (c) an object of the wrong length → same path, `last_error` reports declared C vs
+   length found; (d) a duplicated URI in the list → `422` (it would double-weight one vector).

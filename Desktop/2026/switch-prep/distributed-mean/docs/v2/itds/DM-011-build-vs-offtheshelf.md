@@ -73,7 +73,7 @@ child workflows; Temporal guarantees durable state and at-least-once activities.
 - Strong story for long-running, audit-heavy orchestration.
 
 **Cons:**
-- The event-history model prices dynamic fan-out badly here: ~27k activities per max
+- The event-history model prices dynamic fan-out badly here: ≈25k activities per max
   job × history events per activity, against Temporal's per-workflow history limits —
   forcing continue-as-new choreography that re-introduces exactly the coordination
   we designed away.
@@ -138,7 +138,7 @@ proof, fairness as an ORDER BY) exists *because* we own that transaction.
 
 **Why each rejection.** *Spark/Dask*: right tool, wrong constraints — it erases the deliverable
 itself, breaks the fixed component list, and its executor model assumes away the
-heterogeneity the brief makes central. *Temporal*: dynamic fan-out at 27k
+heterogeneity the brief makes central. *Temporal*: dynamic fan-out at ≈25k
 activities/job fights its history model, and the exactly-once partial-consumption
 invariant would still need our Postgres transaction — two stateful systems where one
 suffices. *Celery/Ray*: inherits DM-003's counter-vs-proof analysis and DM-008's

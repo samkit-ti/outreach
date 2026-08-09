@@ -10,8 +10,8 @@
 
 ## Problem Statement
 
-A max job (F = 100k, C = 1M) decomposes into ≈2k `generate` tasks and ≈25k compute
-tasks — ⌈F/5⌉ = 20,000 leaf `map` tasks plus ≈5,000 `reduce` tasks over ~7 levels —
+A max job (F = 100k, C = 1M) decomposes into ≈25k compute tasks — ⌈F/5⌉ = 20,000 leaf
+`map` tasks plus ≈5,000 `reduce` tasks over ~7 levels and one `finalize` —
 against a fleet of W workers that the brief explicitly says "process files at
 different speeds". Two things must be decided: **how a task reaches a worker**, and
 **how many inputs a task consumes**. The target is that no worker sits idle while any
@@ -107,10 +107,13 @@ task becomes eligible only once all of its K designated children are `done`.
   behaviour that D1 rejects in two-phase map-reduce, reintroduced per-node.
 - It discards the interchangeability property from D2 for no compensating benefit:
   the tree insists on *which* five partials combine when any five would do.
-- The plan is built before `generate` tasks have run (D9), so it is committed at the
-  moment of least information about per-file timing.
-- Materialising ~25k task rows in one submit transaction, plus storing and traversing
-  the edge set, is state we would otherwise not need.
+- The plan is committed before a single task has run, i.e. at the moment of least
+  information: nothing is yet known about actual per-worker speeds, per-vector read
+  latency, or even whether the job will survive to completion rather than being
+  cancelled. A fixed wiring cannot hand a straggler's slot to an idle worker later,
+  when that information finally exists.
+- Materialising the ≈5,000 reduce rows and the edge set on top of T1's 20,000 `map`
+  rows, then storing and traversing that edge set, is state we would otherwise not need.
 
 ### Pull-based claiming with eager, adaptive reduction  ← chosen
 
@@ -291,6 +294,11 @@ a progress-estimation problem our task shape does not support.
    switch. See DM-010.
 4. **K is relaxed above ~50** → leaf task working set exceeds ~400 MB and a task stops
    being a sensible retry unit; re-derive granularity rather than tracking K.
+5. **Cross-node read bandwidth dominates map time** — measured time spent fetching input
+   vectors exceeds the accumulate time by a wide margin → add **data locality** as a
+   claim-order preference: a worker prefers `map` tasks whose input node is co-located with
+   it, falling back to any eligible task so the queue stays work-conserving. Deferred, not
+   rejected: it is a hint inside the existing claim query, not a return to push.
 
 ---
 

@@ -26,11 +26,18 @@ the honest goal is that distributing the work costs nothing in accuracy.
 
 What actually determines the answer here:
 
-- **Value bounds are ours to choose, and we chose them (D9): uniform [0, 1) float64.** So the
-  largest possible sum at any index is **< F ≤ 100k**, against float64's exact-integer ceiling
-  of **2⁵³ ≈ 9.007 × 10¹⁵**. We are ~11 orders of magnitude from the precision cliff. This one
-  fact makes most of the exotic options unnecessary — and saying *why* they are unnecessary is
-  more defensible than reaching for them.
+- **Value bounds are *not* ours to choose.** The inputs are federated-learning model-weight
+  vectors that already exist on the participating nodes (DM-001); the system reads them, it
+  never generates them, so their distribution is given rather than designed. What we can lean
+  on is the type and the scale. The type is float64, which carries **2⁵³ ≈ 9.007 × 10¹⁵** of
+  integer-exact headroom and a **~1.8 × 10³⁰⁸** overflow ceiling. The scale is the stated
+  expectation that trained neural-network weights are **O(1)** in magnitude — initialisation
+  schemes and regularisation keep them there, and values far outside that range indicate a
+  diverged model upstream, not a numerics problem we could fix by summing differently. At
+  **F < 10⁵** addends per index those two facts put the sum astronomically inside range for
+  *any* realistic weight scale: overflow would need per-value magnitudes around **10³⁰³**.
+  That headroom is what makes most of the exotic options unnecessary — and saying *why* they
+  are unnecessary is more defensible than reaching for them.
 - **float64 machine epsilon is ε = 2⁻⁵³ ≈ 1.11 × 10⁻¹⁶** (unit roundoff; ulp spacing at 1.0 is
   2.22 × 10⁻¹⁶).
 - **Error growth depends on summation *shape*, not just on the type.** Serial (naive)
@@ -83,15 +90,16 @@ this one.
 **Cons:**
 - Error bound is **O(F·ε) = 100k × 1.11e-16 ≈ 1.1 × 10⁻¹¹** relative worst case — about
   **10,000× looser** than the tree's bound, and equally 10,000× looser than a plain
-  `numpy.mean` on one node, which is the real reason no one should write this loop. Fine for
-  a mean of random uniforms; not fine as a general accumulation pattern, and the worst case
+  `numpy.mean` on one node, which is the real reason no one should write this loop. Tolerable
+  for a mean of O(1) weights; not fine as a general accumulation pattern, and the worst case
   is realised when addends are similar in magnitude, which is exactly our situation.
 - It is **architecturally unavailable**: it needs one node to read all 800 GB of input, which
   violates the K = 5 constraint's purpose and is the central-accumulator design already
   rejected in DM-001 on ~160 GB of single-NIC bandwidth.
 - Serial in wall-clock: no parallelism at all, so it cannot meet the exercise's premise.
-- Drift is *systematic*, not random: as the accumulator grows toward 100k, each new addend
-  (< 1) is added at a coarser ulp, so late addends are progressively under-weighted.
+- Drift is *systematic*, not random: as the accumulator grows toward ~F times the typical weight
+  magnitude, each new addend (still O(1)) is added at a coarser ulp, so late addends are
+  progressively under-weighted.
 
 ### float64 with (sum, count) partials over the 5-ary reduction tree *(chosen)*
 
@@ -106,8 +114,10 @@ required by DM-001 *is* the pairwise-summation structure.
   costs nothing in accuracy), and ~10⁴× tighter than a naive serial accumulator.
 - **Free.** Zero extra flops, zero extra memory, zero extra code versus the topology we already
   chose for scheduling reasons. The best kind of numerical improvement.
-- Accumulators stay small: a leaf sums ≤5 addends (max 5.0), so no accumulator ever grows large
-  relative to its addends and the systematic late-addend drift of the serial loop never occurs.
+- Accumulators stay small: a leaf sums ≤5 addends, so no accumulator ever grows large relative
+  to its addends and the systematic late-addend drift of the serial loop never occurs. This
+  holds whatever the weight scale is, because it is a statement about the *ratio* of
+  accumulator to addend, not about absolute magnitude.
 - One division, at the very end, on an exact integer F — a single rounding event for the whole
   pipeline instead of F of them.
 - Vectorises: each task is `numpy` array addition over C = 1M elements, one pass, no
@@ -121,8 +131,10 @@ required by DM-001 *is* the pairwise-summation structure.
   is in the `partials` lineage rather than in a loop.
 - The bound is *O(depth)*, so it degrades if the tree ever becomes lopsided (e.g. a long chain
   of fan-in-2 drains in a pathological tail).
-- Gives no protection at all if the value bounds change — it is a bound-dependent argument, and
-  its safety must be re-derived, not assumed, if [0, 1) changes.
+- Gives no protection at all against pathological inputs. The no-overflow half of the argument
+  rests on float64 headroom plus a stated *expectation* about weight scale — an expectation
+  about data we do not produce — so if incoming weight magnitudes or dynamic range ever widen
+  enough to matter, safety must be re-derived rather than assumed.
 
 ### Kahan / Neumaier compensated summation inside workers
 
@@ -133,7 +145,8 @@ lost at each addition.
 - Error bound becomes **O(ε)** — effectively independent of n. The strongest practical bound
   short of exact arithmetic.
 - Robust to *any* value distribution, including catastrophic cancellation and wide dynamic
-  range, which is precisely where our bound-dependent argument stops holding.
+  range, which is precisely where an argument resting on an expected weight scale stops
+  holding.
 - Well understood, no new dependencies, and pairs with the tree rather than replacing it.
 - Genuinely the correct choice for a general-purpose numerics library, which is why it must be
   named rather than dismissed.
@@ -141,7 +154,7 @@ lost at each addition.
 **Cons:**
 - **Solves a problem we do not have.** The tree already delivers ~8.9e-16 relative; Kahan would
   take that to ~1e-16 — an improvement below the precision at which the CSV result is
-  meaningfully consumed and far below any plausible tolerance for a mean of random numbers.
+  meaningfully consumed and far below any plausible tolerance for an averaged weight vector.
 - **Doubles memory per accumulator**: a second C-length compensation vector is another 8 MB per
   in-flight vector, and it must either be serialised with every partial (making partials 16 MB,
   doubling the ~160 GB of level-0 traffic) or discarded at task boundaries — and discarding it
@@ -164,8 +177,8 @@ converting to float only at `finalize`.
   real con of the chosen option.
 - Fixed-point is a legitimate technique in ledger/financial systems and would be the right call
   if the mean fed anything requiring auditable exactness.
-- Values in [0, 1) with a fixed scale factor are unusually well suited to it — a rare case
-  where fixed-point is natural rather than forced.
+- O(1) weight magnitudes with a fixed scale factor are reasonably well suited to it — the
+  narrow-range case where fixed-point is natural rather than forced.
 
 **Cons:**
 - **int64 overflows.** Scaling by 2⁵³ and summing 100k of them reaches ~9 × 10²⁰, past int64's
@@ -177,8 +190,9 @@ converting to float only at `finalize`.
   (denominators grow without bound).
 - Partials stop being fixed-width, so the raw-float64 blob format (D6) and its 8 MB size
   guarantee are gone; the brief's whole storage sizing would have to be redone.
-- Buys precision **below what the input justifies** — exact summation of pseudorandom float64
-  inputs is precision theatre. And shrinking the scale factor to make int64 fit (e.g. 2³⁰)
+- Buys precision **below what the input justifies** — exact summation of trained weights, each
+  itself the approximate output of a stochastic optimiser, is precision theatre. And shrinking
+  the scale factor to make int64 fit (e.g. 2³⁰)
   reintroduces quantisation error, making it strictly worse than float64 + tree.
 
 ### Mixed precision: float32 partials with a float64 accumulator
@@ -217,12 +231,21 @@ no reduced precision.
 
 **Positive case:**
 
-1. **The bounds make float64 unambiguously sufficient, and the argument is quantitative rather
-   than a shrug.** Values are uniform [0, 1) (D9), so the maximum possible sum at any index is
-   **< F ≤ 100k**, versus float64's exact-integer ceiling **2⁵³ ≈ 9.007 × 10¹⁵** — an ~11-order
-   margin. There is no overflow path and no precision cliff anywhere in the stated envelope.
-   Around a magnitude of 10⁵ the ulp is ~1.5 × 10⁻¹¹ absolute, and each addend is O(1), so
-   every addition remains well-conditioned.
+1. **float64's headroom makes it unambiguously sufficient, and the argument is quantitative
+   rather than a shrug — but it is worth being exact about what it rests on.** We do not choose
+   the input distribution: the values are federated-learning model weights produced on the
+   participating nodes, and the system only reads them. So the no-overflow claim rests on two
+   things instead of a bound we control. First, the type: float64 carries **2⁵³ ≈ 9.007 × 10¹⁵**
+   of integer-exact headroom and overflows only above **~1.8 × 10³⁰⁸**. Second, a stated
+   expectation about scale: trained neural-network weights are **O(1)** in magnitude, because
+   initialisation schemes and regularisation keep them there. At **F < 10⁵** addends the sum at
+   any index therefore sits astronomically inside range for *any* realistic weight scale —
+   overflow would require per-value magnitudes near **10³⁰³**, and even at a magnitude of 10⁵
+   the ulp is only ~1.5 × 10⁻¹¹ absolute while each addend stays O(1), so every addition remains
+   well-conditioned. Said plainly: this is float64 headroom plus an expectation about the data,
+   not a guarantee we enforce. Weights far outside O(1) mean a diverged model upstream, which no
+   summation order fixes; if the realistic scale ever widens enough to matter, the deferred
+   **Kahan/Neumaier** compensation of failure condition 1 is the escape hatch.
 
 2. **`(sum, count)` is the correctness invariant, not merely a convenience** (D2, and the
    central argument of DM-001). Sums are associative and commutative, so any worker may combine
@@ -256,8 +279,9 @@ no reduced precision.
    file-shaped at 8 MB, so reduces are limited to 5 inputs too, forcing ⌈log₅ 20,000⌉ = 7
    levels over ≈5,000 reduce tasks), and it happens to inherit the good error bound rather
    than sacrificing one. The mechanism is intuitive once stated, and it is the same mechanism
-   numpy exploits: in the naive loop the accumulator grows to ~100k while each addend stays
-   O(1), so late addends are added at a coarse ulp and are systematically under-weighted. In
+   numpy exploits: in the naive loop the accumulator grows to ~F times a single weight while
+   each addend stays one weight, so late addends are added at a coarse ulp and are
+   systematically under-weighted. In
    a tree — ours or numpy's — every addition combines two operands of *comparable* magnitude,
    which is the regime float64 handles best. Sharding for throughput and summing accurately
    point the same way, which is the pleasant part.
@@ -281,14 +305,14 @@ no reduced precision.
   (a second 8 MB compensation vector per in-flight vector, which either doubles partial size to
   16 MB and the ~160 GB of level-0 traffic, or is discarded at task boundaries and stops
   helping), costing ~4× the flops per add, and defeating the single-pass `numpy` vectorisation.
-  **Named explicitly as the mitigation of record** if the bounds grow (see failure conditions
-  1 and 2) — it composes with the tree rather than replacing it, so adopting it later is
-  additive, not a rewrite.
+  **Named explicitly as the mitigation of record** if incoming value bounds widen (see failure
+  conditions 1 and 2) — it composes with the tree rather than replacing it, so adopting it later
+  is additive, not a rewrite.
 - **Exact integer / fixed-point / Python arbitrary precision:** rejected because int64
   overflows (100k × 2⁵³ ≈ 9 × 10²⁰ > 9.22 × 10¹⁸), so exactness requires int128 or Python
   bigints; bigints replace one 8 MB `numpy` buffer with 1M Python objects per vector — one to
   two orders of magnitude slower — and destroy the fixed-width partial format that D6's 8 MB
-  sizing depends on. It would also be exact summation of pseudorandom approximate inputs.
+  sizing depends on. It would also be exact summation of already-approximate trained weights.
   Retained as the answer if exactness ever becomes a *requirement* rather than a preference.
 - **float32 partials:** rejected as strictly dominated — ~1e-7 relative error injected at each
   of ~7 levels is worse than the serial baseline it aimed to beat, for a bandwidth win that
@@ -296,14 +320,16 @@ no reduced precision.
 
 **Failure condition.** Revisit if any of the following holds:
 
-1. **Value bounds widen beyond [0, 1) — specifically, mixed signs or a dynamic range above
-   ~10⁶.** Then catastrophic cancellation becomes reachable and the bound-dependent argument
-   collapses. Mitigation: adopt **Neumaier (improved Kahan)** compensated summation in `map`
-   and `reduce`, keeping the tree; carry the compensation term in the partial blob and accept
-   16 MB partials.
+1. **Value bounds widen — specifically, incoming weights with a dynamic range above ~10⁶ within
+   a single index.** Mixed signs are expected and harmless in themselves, but wide dynamic range
+   makes catastrophic cancellation reachable and voids the O(1)-scale expectation the headroom
+   argument rests on. Mitigation: adopt **Neumaier (improved Kahan)** compensated summation in
+   `map` and `reduce`, keeping the tree; carry the compensation term in the partial blob and
+   accept 16 MB partials.
 2. **F cap raised above ~10⁹.** The tree bound stays comfortable (log₅ 10⁹ ≈ 13, so ~1.4e-15),
-   but the *sum* magnitude approaches 10⁹ and the F/ε headroom argument must be re-derived
-   rather than assumed. Recheck against 2⁵³ before raising the cap.
+   but the *sum* magnitude grows with F and the headroom argument must be re-derived rather than
+   assumed. Recheck the product of F and the observed weight scale against 2⁵³ before raising
+   the cap.
 3. **Bit-identical output across runs becomes a requirement** (e.g. a regression harness that
    diffs result files byte-for-byte). Eager pairing (D3) makes the tree shape nondeterministic
    and float addition non-associative, so ~1e-15 agreement is the guarantee, not equality.
@@ -315,6 +341,14 @@ no reduced precision.
    partial handling — investigate the tree depth distribution before touching the arithmetic.
 5. **Any float-valued value ever gates control flow** (e.g. a completion check comparing a
    float count). That is a design-guard violation, not a tuning issue; fix the call site.
+6. **Weighted FedAvg becomes a requirement** — averaging each node's weights in proportion to
+   its local example count rather than equally. The mean here is deliberately **unweighted**,
+   but the arithmetic generalises without touching the architecture: the partial becomes
+   `(Σ wᵢ·xᵢ, Σ wᵢ)` instead of `(Σ xᵢ, n)` — the same monoid, so the same 5-ary tree (DM-001),
+   the same order-independence, and the same exactness argument all carry over verbatim. The
+   payload grows by 8 bytes (a float64 weight total in place of the integer count) and the
+   division in `finalize` becomes `Σwx / Σw`. Not built; documented here as the one-line
+   evolution it is, so that adopting it is a change of two expressions rather than a redesign.
 
 ---
 
@@ -326,7 +360,7 @@ no reduced precision.
 | Unequal-group correctness | F = 12 fixture (ten 0.0 files, two 1.0 files) → exactly 1/6; mean-of-means would give 1/3 | Integration test asserting `abs(result - 1/6) < 1e-15` |
 | Distribution is accuracy-neutral vs numpy; both beat the naive loop | Against a `math.fsum` / exact reference on an adversarial fixture (F = 100k of ~1e-9 addends): tree error ≈ single-node `numpy.mean` error (same order, no systematic loss from distributing), and **both** ≥10³× closer than a deliberately naive serial float64 loop over the same data | Dedicated numerics test comparing all four: exact reference, tree, `numpy.mean`, naive loop |
 | No overflow / no inf / no nan | Zero non-finite values in any partial or result, at every F in the scale suite | Assertion in `reduce` and `finalize` on `numpy.isfinite().all()` |
-| Sum-magnitude headroom | Max observed `sum` element < 1e5, i.e. < 2⁵³ / 10¹⁰ | Max-value counter recorded per `finalize` in the `events` log (D11) |
+| Sum-magnitude headroom | Max observed `sum` element ≥ 10 orders of magnitude below 2⁵³ ≈ 9.007e15 (O(1) weights at F < 1e5 land near 1e5) | Max-value counter recorded per `finalize` in the `events` log (D11) |
 | Single division | Exactly one division per job (in `finalize`); zero divisions in `map` / `reduce` | Static check + code review; grep-level design-guard on worker modules |
 | Integer-only completion logic | `count` typed `BIGINT` / Python `int` end to end; zero float comparisons in completion or fan-in code paths | Type assertions + design-guard test |
 | Storage round-trip is lossless | Partial written then re-read is bit-identical (raw float64, D6) | Property test over random C-length vectors |

@@ -9,7 +9,7 @@
 
 ## Problem Statement
 
-The fleet has to execute ≈25k compute **tasks** plus ≈2k `generate` tasks for a single max **job**
+The fleet has to execute ≈25k **tasks** for a single max **job**
 (F=100k, C=1M), where each leaf `map` task consumes up to **K**=5 inputs of 8 MB each and emits one
 8 MB **partial**. Two things must be decided: (1) what a **worker** *is* as an OS-level artifact —
 process, thread in a pool, or coroutine on an event loop — and (2) how **W**, the system-level worker
@@ -29,11 +29,10 @@ this ITD defines it.
   buffers (a 1M-line CSV is ≈19 MB of text, ~40 MB transient in pandas' C engine), not 5×8 MB. Real
   per-worker RSS at C=1M lands around 150 MB including the CPython+numpy baseline.
   Stated canonically (A-8): **K=5 is a logical fan-in limit on how many files' worth of data a task
-  may have in flight; we honour the stricter byte reading too by streaming.** `generate` is exempt
-  from K because it writes files sequentially and aggregates nothing; under the stricter reading of K as
-  covering writes, `GEN_BATCH` drops from 50 to 5 and the generate-task count rises 10× (≈2,000 →
-  ≈20,000 for the max job), changing nothing structurally — this knob exists precisely so the
-  disagreement is a config value, not a redesign.
+  may have in flight; we honour the stricter byte reading too by streaming.** There is no exempt task
+  type: `map` and `reduce` both fan in ≤5 inputs and both stream them one at a time into a single
+  length-C accumulator, so peak resident is ~1 vector (8 MB), not 5. K therefore holds under either
+  reading of the constraint for every task type in the system.
 - **Workers process files at different speeds** (given). The straggler answer is DM-002: pull-based
   claiming (D4) plus eager pairing (D3). Nothing is pushed to a named worker, so a slow worker
   simply claims fewer tasks. The worker model must not undermine this — in particular a worker must
@@ -72,7 +71,7 @@ re-running compose. No API surface, no supervisor, no `desired_workers` row.
 **Cons:**
 - Forfeits the stated bonus.
 - Forfeits the most persuasive live demo beat: setting W=0, watching queue depth climb with the job
-  visibly stalled, then W=4 and watching the backlog drain (≈27k tasks at the max-job envelope; a
+  visibly stalled, then W=4 and watching the backlog drain (≈25k tasks at the max-job envelope; a
   few hundred on the F=1000 demo job, which is what actually drains on screen).
 - W becomes a deploy-time constant, so any future elasticity work starts from scratch rather than
   from a `desired_workers` value that already exists.
@@ -244,8 +243,8 @@ row, so DM-009 gets desired-vs-actual for free.
 SIGTERM sets a `draining` flag and returns immediately; the loop finishes the current task, commits
 it (including any eager-pairing enqueue), marks its `workers` row `gone`, and exits 0. It does not
 claim again. The lease is never abandoned: abandoning would still be *correct* (the reaper requeues
-within 35 s) but would throw away real numpy work — a `generate` task writing 50 files × 8 MB is the
-long pole. This is bounded by the platform's grace period: compose `stop_grace_period` and ECS
+within 35 s) but would throw away real numpy work — a `map` task moving ~108 MB and ~2.2 s of real
+numpy plus I/O is the long pole. This is bounded by the platform's grace period: compose `stop_grace_period` and ECS
 `StopTimeout` (max 120 s) are set to 120 s, and any task exceeding that degrades to the lease path
 rather than to data loss. Correctness never depends on the drain completing; only efficiency does.
 

@@ -13,8 +13,8 @@ The bonus asks for "a UI with updating logs: workers free/busy, jobs completed, 
 anything else judged relevant". Two of the brief's critical aspects — *how the system decides a job is
 finished* and *support submitting multiple jobs while jobs are ongoing* — are claims about behaviour
 that are only believable if they are visible while running. A max **job** (F=100k, C=1M) is ≈20,000
-leaf `map` **tasks** plus ≈5,000 `reduce` tasks over ~7 levels plus ≈2,000 `generate` tasks
-(≈25k compute tasks total), so the UI has to show meaningful progress over tens of thousands of state
+leaf `map` **tasks** plus ≈5,000 `reduce` tasks over ~7 levels plus one `finalize` task
+(≈25k tasks total), so the UI has to show meaningful progress over tens of thousands of state
 transitions without either lying or flooding the browser. Target: a state change is on screen within
 1 s, per-**job** progress % is monotone non-decreasing and hits exactly 100% when the result file is
 written, and 10 concurrent browser tabs cost one DB query per second in aggregate. Today there is no
@@ -219,7 +219,8 @@ query/sec, not 30.
 `done_tasks / total_tasks` is wrong here, and specifically: at submit, `total` is ⌈F/5⌉ = 20,000; by
 the end it is ≈25,000 because eager pairing (D3) keeps adding `reduce` tasks. A user watching that
 sees the bar *go backwards* every time the reduce forest grows. It is also non-comparable across jobs,
-since a `generate` task and a level-6 `reduce` are wildly different amounts of work.
+since a leaf `map` task reading up to 5 whole input objects and a level-6 `reduce` are wildly
+different amounts of work.
 
 Instead we measure **file coverage**, which is monotone by construction because a **partial** carries
 `(sum_vector, count)` where `count` is the number of input files it covers (D2):
@@ -283,7 +284,7 @@ The 1 Hz snapshot frame:
 
 ```json
 { "workers": { "desired": 4, "actual": 4, "free": 1, "busy": 3, "draining": 0 },
-  "queue":   { "pending": 812, "claimed": 3, "by_type": { "generate": 0, "map": 780, "reduce": 32, "finalize": 0 },
+  "queue":   { "pending": 812, "claimed": 3, "by_type": { "map": 780, "reduce": 32, "finalize": 0 },
                "oldest_pending_age_sec": 4.2, "oldest_claimed_age_sec": 1.8 },
   "jobs":    { "queued": 1, "running": 2, "completed": 7, "failed": 0 },
   "throughput_tasks_per_sec": 11.4,

@@ -1,12 +1,16 @@
 # Distributed Mean — Distributed Aggregation System Design
 
 Design + (upcoming) implementation for the "Distributed Mean" problem:
-compute the index-wise mean of F files × C random numbers across a fleet of W
+compute the index-wise mean of F files × C numbers across a fleet of W
 heterogeneous workers, with a hard fan-in constraint of K=5 files per worker.
+The concrete setting is **federated-learning weight aggregation** — the F inputs are
+model-weight vectors that already exist on distributed nodes, submitted as
+`inputUris[]`; the system ingests references and never generates data
+(`docs/v2/00-problem-statement.md` §Setting).
 
 ## STATUS
 
-**Design: complete and hardened (v2). Implementation: not started —
+**Design: complete and hardened (v2.2). Implementation: not started —
 next phase.** Every "Success Metrics" table in the ITDs is an *acceptance target for
 the implementation*, not a measurement; numeric projections derive from the envelope in
 `01-requirements-and-assumptions.md` §4. The first code to be written (highest proof-value first): the T2
@@ -24,7 +28,7 @@ a lone partial with **count = F** is the answer.
 
 | Brief's criterion | Answer | Where |
 |---|---|---|
-| F > 5 ⇒ no 1:1 job↔queue-item | job explodes into generate/map/reduce/finalize tasks on one queue | DM-001, HLD §3 |
+| F > 5 ⇒ no 1:1 job↔queue-item | job explodes into map/reduce/finalize tasks on one queue | DM-001, HLD §3 |
 | Efficient distribution | pull-based claiming + eager adaptive fan-in (straggler-proof) | DM-002 |
 | Deciding a job is finished | conservation proof: lone partial with count=F | DM-003 |
 | Multiple concurrent jobs | fairness = ORDER BY in the claim query (least-in-flight first) | DM-007 |
@@ -37,17 +41,18 @@ a lone partial with **count = F** is the answer.
 **[interactive simulator](docs/v2/simulator.html)** (open locally in a browser; Vercel deployment planned) —
 race the chosen design against its rejected alternatives (same seed, same workers).
 
-## Current version: **v2** (see `docs/v2/CHANGELOG.md`)
+## Current version: **v2.2** (see `docs/v2/CHANGELOG.md`)
 
 | Version | Date | Scope |
 |---|---|---|
+| v2.2 | 2026-08-10 | Scope change: inputs pre-exist (federated-learning wrapper). Generation removed end to end → 3 task types, T1 seeds all map tasks, `dedupe_key` deleted, flat 300 s deadline, read allow-list for user-supplied `inputUris`. Details in `docs/v2/CHANGELOG.md`. |
 | v2 | 2026-08-10 | 4 blockers fixed (claim-query `finalizing` hole, pairing race → per-job advisory lock, heartbeat fencing, priority inversion); result delivery decided; admission control; API idempotency; DM-011 added; numerics claim made precise. Details in `docs/v2/CHANGELOG.md`. |
 | v1 | 2026-08-09 | Initial full design: requirements, HLD, LLD, ITDs DM-001…DM-010, journey, simulator. Immutable. |
 
 ## Full reading order (docs/v2/)
 
 1. `00-problem-statement.md` — the brief, verbatim
-2. `01-requirements-and-assumptions.md` — FR/NFR, assumptions A-1…A-9, envelope + service-time model
+2. `01-requirements-and-assumptions.md` — FR/NFR, assumptions A-1…A-10, envelope + service-time model
 3. `04-decision-journey.md` — the decision index: question → chosen answer (one-line reasoning) → alternatives (one line each), tiered Scope → Bare minimum → MVP → Optimizations → Edge cases
 4. `02-hld.md` — architecture, diagrams, why-not-Spark, failure modes, AWS story
 5. `03-lld.md` — schema, claim SQL, the three transactions, worker loop, API spec, runbook

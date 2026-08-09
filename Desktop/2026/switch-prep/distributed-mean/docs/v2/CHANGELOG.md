@@ -1,5 +1,76 @@
 # CHANGELOG
 
+## v2.2 — 2026-08-10 · scope change: inputs pre-exist (federated-learning wrapper)
+
+Not a correctness pass — a **scope decision**. The underlying setting is federated-learning
+weight aggregation: the F inputs are model-weight vectors of C float64 values that already
+exist on the nodes that trained them, exposed at S3-API URIs. The system therefore **never
+generates inputs**. `POST /jobs` takes an explicit `inputUris[]` (F = list length; C declared
+and validated at read) in place of `{f, c}`. The mean stays **unweighted**; weighted FedAvg —
+partials carrying `(Σ wᵢ·xᵢ, Σ wᵢ)` — is a documented one-line evolution, not built.
+
+The aggregation design is untouched: same monoid, same eager 5-ary tree, same completion
+proof, same fairness ordering, same lease/fencing model. What changes is everything upstream
+of the first `map` task.
+
+### Consequences
+
+1. **Three task types** — `map`, `reduce`, `finalize`. `generate` is removed end to end
+   (enum, priority CHECK, payload union, worker executor, config, priority lists).
+2. **T1 seeds the whole map frontier.** The submit transaction slices `inputUris[]` into
+   ⌈F/5⌉ `K_FANIN`-sized chunks in list order and inserts every `map` row — 20,000 at the max
+   job. Affordable because the URIs are known at submit; nothing must be observed first.
+   (LLD §4 T1, HLD §3/§4)
+3. **`dedupe_key` and `idx_tasks_dedupe` deleted.** With no task spawning another, a duplicate
+   map task is unrepresentable rather than merely detected — a transaction commits every map
+   row or none. `reduce` dedupe still comes from the consumed-guard, `finalize`'s from the
+   `running → finalizing` CAS. (LLD §1/§2, DM-006)
+4. **Priorities collapse to `finalize=0 < reduce=1 < map=2`**, CHECK constraint and every
+   priority list with them. (LLD §1/§3, DM-007)
+5. **Flat `TASK_DEADLINE_SECONDS = 300`.** The 1800 s entry existed only for generate; the
+   three surviving types do comparable work (heaviest is a `map` at ~2.2 s, so ~135×
+   headroom). The mechanism stays per-type-capable — per-type ceilings return as a `CASE` if a
+   heavier type is ever added. (LLD §3/§8, DM-006)
+6. **Envelope re-based on read-only inputs.** Data-plane traffic ≈**1.2 TB** (800 GB input
+   reads + ~400 GB intermediates) against ≈**200 GB resident that we own** — the 800 GB of
+   inputs is the nodes' storage bill, not ours. Task counts ≈**25k** per max job (20,000 map +
+   ≈5,000 reduce + 1 finalize); the F=1000 demo is **264 tasks ≈ 2.4 min at W=4**. Every
+   ≈27k / ≈2k-generate figure updated across the set. (01 §4, CONTEXT-BRIEF, all ITDs)
+7. **New edge case: an unreadable input.** A URI that is unreachable, missing, or holds the
+   wrong number of values fails the `map` task past the blob client's bounded retries, retries
+   via T4, then goes `dead` → job `failed` with the offending URI in `last_error`. C is
+   validated at read (byte length `= C×8` for `.f64`, line count `= C` for `.csv`); a mismatch
+   is permanent but still travels the normal path and costs its three attempts. Existence is
+   deliberately *not* checked at submit — that would be F HEADs on the submit path.
+   (LLD §5/§6, HLD §7, DM-006)
+8. **SSRF posture inverted for reads.** `inputUris[]` is user-supplied, so an unguarded
+   fetcher would be an SSRF primitive. Writes stay confined to `jobs/{jobId}/`; reads are
+   permitted only for buckets/hosts in the new `INPUT_URI_ALLOWLIST`, checked at submit and
+   again at read. (HLD §9, LLD §5/§8, 01 A-10, DM-005)
+9. **Two new deferred evolutions with triggers** — data locality in claim order (trigger:
+   cross-node read bandwidth dominating map time) and weighted FedAvg (trigger: aggregation
+   must weight clients by sample count). (04 §4, DM-001, DM-002, DM-005, DM-010)
+10. **A-1's no-overflow argument re-based honestly.** It assumed values in [0,1), a bound we
+    chose. We no longer choose the distribution: the claim now rests on float64's ~2⁵³ of
+    integer-exact headroom plus a stated expectation that trained weights are O(1) — overflow
+    would need magnitudes ~10³⁰³ — with Kahan summation as the named escape hatch if
+    magnitudes widen. The *precision* argument is unchanged; it only ever depended on the
+    number of addends. (01 A-1, DM-010)
+11. **Input format is no longer ours to pick — only what we accept is.** Both `.csv` (one
+    value per line) and raw `.f64` are read, sniffed by extension, each validated against C.
+    Partials stay raw float64; the result stays CSV. Inputs are external and never under
+    `jobs/{jobId}/`; they are never GC'd, because they are not ours. (LLD §7, DM-005)
+12. **The demo's fixture seeder is a harness, not a feature.** `make seed F=… C=…` writes
+    fixture weight vectors into a MinIO bucket standing in for the nodes' storage and prints
+    their URIs; `make demo` submits them. It writes to an allow-listed bucket that is *not*
+    the one workers write to, so the demo exercises the real read/write asymmetry.
+    (01 A-2, LLD §9) CONTEXT-BRIEF's D9 is marked **withdrawn** rather than renumbered, to
+    keep D-numbering stable across the ITDs that cite it.
+
+`00-problem-statement.md` keeps the interviewer's brief verbatim — including its
+random-number generation — with a marked "Setting" section above it naming the substitution.
+`simulator.html` is updated separately in the build phase.
+
 ## v2.1 — 2026-08-10 · red-team pass on decision soundness
 
 A third adversarial pass, aimed specifically at whether the v2 decisions hold as an

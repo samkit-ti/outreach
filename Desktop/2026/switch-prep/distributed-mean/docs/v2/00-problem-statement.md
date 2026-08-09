@@ -2,6 +2,16 @@
 
 > Source: interviewer-provided Google Doc (`1sbcfM2Anu096MEdPb_qe6M_ScjVfTIk1F8F5GDlT7Q4`), captured 2026-08-09.
 
+## Setting (context for this design — not part of the brief)
+
+The underlying scenario is **federated-learning weight aggregation**: the F files are
+model-weight vectors of C float64 values that **already exist** on distributed nodes,
+exposed at S3-API URIs. The brief's random-number *generation* is therefore replaced by
+**ingestion of pre-existing inputs** — `POST /jobs` takes an explicit `inputUris[]`
+(F = list length) instead of generating anything. Everything else in the brief below —
+the index-wise mean, the K=5 fan-in constraint, W workers, the queue, the aggregation
+question — is unchanged, and the text that follows is verbatim.
+
 ## Summary
 
 Design a system that assigns a large job to be processed across a fleet of workers. The workers' outputs are aggregated into a single result which is returned to the user.

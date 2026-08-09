@@ -10,12 +10,12 @@
 
 ## Problem Statement
 
-A max job (F=100k, C=1M) decomposes into ≈2k `generate` tasks plus ≈25k compute tasks
-(20,000 leaf `map` tasks and ≈5,000 `reduce` tasks over ~7 tree levels), executed by W
+A max job (F=100k, C=1M) decomposes into ≈25k compute tasks — 20,000 leaf `map` tasks,
+≈5,000 `reduce` tasks over ~7 tree levels, and one `finalize` — executed by W
 heterogeneous workers pulling from a Postgres-backed queue. At that task count, worker
 death is not an edge case: a 0.1% per-task failure rate loses ~25 tasks per job, and a
 lost partial high in the reduce tree destroys the work of an entire subtree (a level-5
-partial covers 5⁵ = 3,125 input files). The system must therefore (a) detect a dead or
+partial covers 5⁵ = 3,125 input vectors). The system must therefore (a) detect a dead or
 hung worker without a human in the loop, (b) re-execute its task, and (c) guarantee that
 re-execution cannot corrupt the answer — because the deliverable is an *exact* index-wise
 mean, and a silently double-counted or silently dropped partial produces a plausible but
@@ -33,6 +33,11 @@ Constraints and locked decisions this decision has to live inside:
   rather than few large ones. Small tasks are cheap to retry (a `map` task reads 5 × 8 MB
   and sums 5M float64 — seconds of work), which is what makes restart-on-failure viable
   instead of mid-task checkpointing.
+- **The inputs are not ours.** The F weight vectors already exist on distributed nodes and
+  arrive as an explicit `inputUris[]` on `POST /jobs`; the system never generates an input.
+  So every `map` task's work is fully determined by a fixed list of ≤5 URIs known at
+  submission time — and a *foreign*, possibly-unreachable object becomes a first-class
+  failure mode rather than something we control.
 - **D4 / pull-based distribution (DM-002, DM-003).** Nothing is assigned to a named
   worker, so "worker X died, reassign its tasks" is not a lookup we can do from an
   assignment table — liveness has to be expressed on the *task*, not on the worker.
@@ -50,7 +55,7 @@ Constraints and locked decisions this decision has to live inside:
   on heavily for the double-consume guard.
 - **D2 / D12 (DM-001, DM-010).** Partials carry `(sum_vector, count)`; `finalize` divides
   by F exactly once. The invariant `count == F` at finalize time is an end-to-end checksum
-  over the whole distributed execution: it fails loudly if any input file was lost *or*
+  over the whole distributed execution: it fails loudly if any input vector was lost *or*
   counted twice.
 
 ---
@@ -74,7 +79,7 @@ the task is simply gone.
   the wrong denominator, and *with* the count check the job simply fails after hours of
   work with no recovery path.
 - The loss is disproportionate high in the tree: dropping one level-5 partial discards
-  3,125 files' worth of already-completed work — 3.1% of a 100,000-file job in one lost
+  3,125 vectors' worth of already-completed work — 3.1% of a 100,000-vector job in one lost
   8 MB object, versus 0.005% for a lost leaf.
 - Makes worker crashes a data-integrity event rather than a scheduling event, which means
   every deploy, every OOM, and every spot-instance reclaim is a correctness incident.
@@ -95,7 +100,7 @@ Coordinate the queue state change and the object-store write in a two-phase comm
   write-then-mark plus compensation on abort — which is exactly at-least-once with extra
   steps.
 - 2PC blocks on coordinator failure: an in-doubt transaction holds locks until the
-  coordinator recovers. With ≈27k tasks per job and W workers, one wedged coordinator
+  coordinator recovers. With ≈25k tasks per job and W workers, one wedged coordinator
   stalls the fleet, which is a worse liveness story than the crash it was protecting
   against.
 - Adds a synchronous round-trip per task boundary to a workload whose tasks take seconds,
@@ -125,8 +130,8 @@ be discarded harmlessly.
   guarantee silently breaks.
 - Duplicate execution is real: two workers can briefly run the same reduce task, doing the
   same 40 MB of reads. Wasteful, though bounded.
-- Requires disciplined determinism (per-file seeds in `generate`, key derived from task id
-  not attempt number), which constrains future task design.
+- Requires disciplined determinism (output key derived from the task id and not the attempt
+  number, over an input set fixed at task creation), which constrains future task design.
 
 ### Worker liveness via a dedicated membership service (ZooKeeper / etcd sessions)
 
@@ -204,9 +209,11 @@ requeue path serves crashes (reaper-driven) and exceptions (worker-driven).
 
 1. **Deterministic keys make re-execution a no-op.** A task's output object key is derived
    from the task id, never from the attempt number: `jobs/{job_id}/partials/{task_id}.f64`.
-   Combined with a *pure* task body — a `map` task over a fixed set of 5 input files, a
-   `reduce` task over a fixed set of partial ids, a `generate` task with per-file
-   deterministic seeds (D9) — a retry writes byte-identical content to the same key. S3's
+   Combined with a *pure* task body — a `map` task over a fixed list of ≤5 input URIs, a
+   `reduce` task over a fixed set of partial ids — a retry writes byte-identical content to
+   the same key. Both input sets are stamped into the task's payload when the task is
+   created and never recomputed, so purity is a property of the row rather than a hope about
+   the worker. S3's
    PUT is atomic per object, so a concurrent reader sees either the previous complete object
    or the new complete object, never a torn one. Overwriting is therefore not a hazard to be
    managed; it is the mechanism.
@@ -217,26 +224,26 @@ requeue path serves crashes (reaper-driven) and exceptions (worker-driven).
    past F and corrupts the mean. A unique constraint on `partials(produced_by)` with
    `INSERT … ON CONFLICT (produced_by) DO NOTHING` makes the second commit a no-op.
 
-   **The `dedupe_key` claim is narrower than it looks, and worth scoping precisely.** It
-   covers exactly one case: **`generate`-spawned `map` tasks**, which have a natural key
-   `map:{job_id}:{file_idx_from}` (unique-indexed where non-null), so a re-run `generate` task
-   re-inserting its batch's map tasks conflicts and inserts nothing — it cannot fork a
-   duplicate subtree. **The key must be a pure function of the payload, and that is why it is
-   the file index rather than a batch counter.** A spawn-time counter is computed fresh on each
-   attempt, so a retried `generate` would emit keys the first attempt never used, every insert
-   would succeed, and the duplicate `map` tasks' partials would push the job's total count past
-   F — turning the `count == F` end-to-end checksum from a safety net into a permanent failure.
-   The file-index form derives from the `generate` task's own `fileIdxFrom..fileIdxTo` range
-   chunked by K, which is fixed at the task's creation, so attempt 1 and attempt 2 derive
-   byte-identical keys (LLD §2). **`reduce` tasks have no natural key at all**: their identity is the
-   *set of partials they consume*, which is chosen at creation time from whatever happens to
-   be unconsumed, so two legitimate reduce tasks of the same job at the same tree level are
-   indistinguishable by any tuple of columns. Their dedupe comes from a different mechanism —
-   the consumed-guard below makes re-creation *unrepresentable* rather than merely rejected,
-   because the partials a duplicate would need are already stamped with another task's id.
-   **`finalize` dedupe** comes from neither: it is the `running → finalizing` compare-and-set
-   on the job row (DM-003), which exactly one transaction can win. Three task types, three
-   different idempotency mechanisms; only one of them is `dedupe_key`.
+   **There is no spawn-dedupe key, because there is no dynamic spawn to dedupe.** It is worth
+   saying plainly, because a natural-key column is the reflex answer to "what stops a
+   duplicate task?" and here the question does not arise. **`map` tasks are created exactly
+   once, in T1, the submit transaction**: the caller supplies `inputUris[]`, T1 chunks that
+   list by `K_FANIN` in list order and inserts all ⌈F/5⌉ rows, and the transaction either
+   commits every one of them or none (LLD §4 T1). Nothing later in the job's life creates a
+   `map` task, so there is no second attempt that could re-insert one — a duplicate map task
+   is *unrepresentable*, not *rejected*, and a `tasks.dedupe_key` column would be an index
+   nothing could ever conflict on. **`reduce` tasks have no natural key at all**: their
+   identity is the *set of partials they consume*, which is chosen at creation time from
+   whatever happens to be unconsumed, so two legitimate reduce tasks of the same job at the
+   same tree level are indistinguishable by any tuple of columns. Their dedupe comes from the
+   consumed-guard below, which likewise makes re-creation unrepresentable rather than merely
+   rejected: the partials a duplicate would need are already stamped with another task's id.
+   **`finalize` dedupe** comes from a third place — the `running → finalizing`
+   compare-and-set on the job row (DM-003), which exactly one transaction can win. Three task
+   types, three different idempotency mechanisms — a single atomic creation, a transactional
+   consumed-guard, and a CAS — and it is worth being honest that they are not one unified
+   scheme. What they share is that each makes the duplicate impossible to represent, which is
+   strictly stronger than detecting it after the fact.
 
 3. **A fenced commit lets us discard a zombie's work safely.** The commit transaction is
    `UPDATE tasks SET status='done' WHERE id = $t AND lease_token = $mine AND status='claimed'`.
@@ -314,10 +321,10 @@ the second committer runs on a complete, post-commit view and exactly one of the
 | Worker hangs / long GC / paused VM (zombie holding a lease) | Lease expires (the reaper cleared its token), task is requeued, two executors run concurrently for a while; the zombie's heartbeat *and* its eventual commit both match 0 rows on the `lease_token` + `status='claimed'` fence, so it discards its work | Fenced commit + fenced heartbeat + idempotent PUT. Cost is duplicated compute, not corruption |
 | Reaper crashes | Expired leases are simply not reclaimed until it restarts; nothing else degrades — claims, executions, and commits continue | Degraded liveness, never broken safety. The reaper is stateless and its action (`UPDATE … WHERE lease_expires_at < now()`) is idempotent, so we can run several instances with no leader election |
 | Postgres unavailable | Workers cannot claim, cannot heartbeat, cannot commit → the fleet quiesces within one poll interval. On recovery, in-flight leases have expired and those tasks are requeued | Nothing is lost because every transition is a transaction: an interrupted transition rolls back whole. See "why pause is fine" below |
-| Object store unavailable | Read or PUT raises past the client's bounded retries; the worker requeues its own task to `pending` with the cause in `last_error` (T4, fenced by its lease token). Third attempt → `dead` → job `failed` with cause | The data plane *is* the data. There is no correct way to continue without it, so failing loudly beats producing a mean over the files that happened to be readable. Requeue-is-retry means this path and the crash path are the same code |
+| Object store unavailable | Read or PUT raises past the client's bounded retries; the worker requeues its own task to `pending` with the cause in `last_error` (T4, fenced by its lease token). Third attempt → `dead` → job `failed` with cause | The data plane *is* the data. There is no correct way to continue without it, so failing loudly beats producing a mean over the vectors that happened to be readable. Requeue-is-retry means this path and the crash path are the same code |
 | API process dies | Jobs and tasks are in the DB; the API is stateless (this is precisely why D1 rejected a central accumulator on the API). Workers keep draining the queue; SSE clients reconnect (D11, DM-009) | No job state lives in API memory |
 | Poison task (deterministic bug, malformed input) | Fails identically 3 times, then `dead` → job `failed` with the recorded error | We deliberately do **not** classify transient vs deterministic failures. A misclassifier that calls a transient S3 blip "permanent" fails a 3.5 h job needlessly; three cheap attempts cost ≤3× a few seconds |
-| Duplicate `generate` task | Re-generates the same files from the same per-file seeds (D9) → byte-identical files; its `map` tasks are re-inserted under `ON CONFLICT (dedupe_key) DO NOTHING` | Determinism turns input generation into just another idempotent effect |
+| Input URI unreachable, missing, or the wrong length | The `map` task's blob GET raises past the client's bounded retries; the worker requeues its own task (T4) with the offending URI in `last_error`; three attempts, then `dead` → job `failed` with that URI recorded. A **C-length mismatch** (`len(buf) != C × 8`, or a CSV row count != C) is permanent — no retry can change an object's length — and still consumes its three attempts | The inputs are foreign, so an unreadable one is a fact about the world, not a bug we can retry away. Failing loudly with the URI names the node to go fix; a mean over the vectors that happened to be readable would be a silent lie. We do not shortcut the permanent case to one attempt: the misclassification risk (calling a transient 503 permanent) costs more than two extra cheap attempts |
 
 **The wedged-but-heartbeating worker — the case the lease alone does not cover.** Everything
 above assumes a stuck worker eventually stops heartbeating. One realistic failure violates
@@ -331,15 +338,19 @@ past it** (`… AND lease_expires_at < deadline_at`, entirely server-side), and 
 reclaims any task whose `deadline_at` has passed *regardless of heartbeat liveness*. A lease is
 a renewable permission; a deadline is not renewable, which is the whole point.
 
-**The deadline is per task type, because the types are not comparable.** For `map`, `reduce`,
-and `finalize` it is 300 s — vast headroom over the ~2.2 s service-time constant. For
-`generate` it is 1800 s, and one number forces that split: a `generate` task writes
-`GEN_BATCH=50` files of ~20 MB, i.e. **~1,000 MB**, which is ~20 s at the 50 MB/s model and
-~200 s on a worker running at the 10× slowdown the straggler demo deliberately configures. A
-flat 300 s would therefore reap *healthy* generate tasks under exactly the heterogeneity NFR-2
-tells us to tolerate, and each reap would re-write 1,000 MB — a deadline that manufactures the
-straggler problem it was supposed to bound. 1800 s keeps ~9× headroom over the slow case while
-still bounding the wedged one.
+**The deadline is flat at `TASK_DEADLINE_SECONDS = 300` for all three types, because the three
+types are comparable.** `map`, `reduce`, and `finalize` all read a handful of 8 MB objects, do
+one vectorised pass, and write one object; against the ~2.2 s service-time constant for a
+`map`, 300 s is ~135× headroom — enough to absorb the 10× slowdown the straggler demo
+deliberately configures and still leave an order of magnitude, so the deadline reaps wedged
+tasks and never healthy slow ones. There is no heavier type to accommodate: nothing in the
+system moves the bulk of a job's bytes in a single task.
+
+**The mechanism stays per-type even though the number does not**, and that is deliberate: the
+claim query reads the ceiling off the row's own `type`, so if a task type is ever added that
+does move hundreds of megabytes, restoring a per-type deadline is a config change and not a
+redesign. A flat number applied by a per-type mechanism is the cheap position to hold — we get
+one value to reason about today without having to reintroduce a dimension later.
 
 Second, **the blob-store client cannot hang in the first place**: `connect_timeout=5s`,
 `read_timeout=30s`, bounded retries (3, jittered exponential) on the boto3 config, so a
@@ -356,15 +367,15 @@ state, i.e. exactly the dual-write hazard D5 was chosen to eliminate. Availabili
 right thing to trade away here, and we trade it away explicitly.
 
 **Why max attempts = 3, and why a dead task fails the whole job.** A job's deliverable is
-the exact index-wise mean over F files. If one leaf is permanently unprocessable, no correct
-answer exists; emitting a mean over 99,995 files would be a silent lie in a 1M-element file
+the exact index-wise mean over F vectors. If one leaf is permanently unprocessable, no correct
+answer exists; emitting a mean over 99,995 vectors would be a silent lie in a 1M-element file
 that no consumer can validate. So the job fails with a cause, and `finalize`'s
 `assert count == F` (D2/D12, DM-010) is the last line of defence — it catches any lost *or*
 double-counted work end-to-end, independent of everything above.
 
 **The one exception: `finalize` gets 10 attempts and can never fail its job.** Everything in
 the paragraph above rests on "the work cannot be produced", which is true of a `map` over an
-unreadable file and false of `finalize`. By the time a `finalize` task exists, the
+unreachable input URI and false of `finalize`. By the time a `finalize` task exists, the
 `count == F` partial exists — the job's whole computation is *done*, and all that remains is
 one 8 MB read, a divide, and a PUT, every part of it idempotent. Killing the job there
 discards hours of completed work for a transient fault on the cheapest task in the system,
@@ -377,23 +388,25 @@ backstop can then reset such a job to `finalizing` and re-enqueue. The asymmetry
 deliberate and one-directional: we will let a job sit visibly unfinished, never let it
 throw away a finished answer.
 
-**How the `generate → map` dependency is handled (D9).** Input generation is distributed:
-≈2,000 `generate` tasks × ~50 files. Their `map` tasks are **not** created at submission
-time; a generate task's commit transaction creates the 10 `map` tasks for its 50-file batch —
-the same "work creates work inside the completing transaction" mechanism as D3's eager
-pairing. **That transaction is also what computes each spawned `map` task's payload**, and it
-is the only thing that does: it chunks its own `fileIdxFrom..fileIdxTo` range by K, and for
-each chunk writes the chunk bounds, the `dedupe_key` above, and `inputUris` — derived from
-`jobs/{jobId}/inputs/{fileIdx}.csv` over the chunk, via the single shared key constant the
-API, this branch, and the worker's `BlobStore` all use (LLD §2, §7). Nothing else needs to
-know how an input file is named, and no `map` task ever receives a URI it did not get from
-that one layout. This buys an invariant worth stating plainly: **a task exists if and only if its
-inputs exist, so the queue only ever contains runnable tasks.** There is no blocked/waiting
-state, no DAG scheduler, no join barrier, and the claim query (D8, DM-007) never has to test
-readiness. It also means a redelivered reduce or map task can never find its inputs missing.
+**There is no task-creates-task dependency on the `map` side at all.** The inputs already
+exist before the job does, so every `map` task is seeded at submission time: **T1 chunks the
+caller's `inputUris[]` by `K_FANIN` in list order and inserts all ⌈F/5⌉ `map` rows inside the
+single submit transaction** (LLD §2, §4 T1). Each row's payload carries the ≤5 URIs it must
+read, and **those URIs are its identity** — they are the only thing that distinguishes one
+`map` task from another, they are written once at insert, and no later code path recomputes
+them. The API validates them against `INPUT_URI_ALLOWLIST` and records the declared C in the
+same transaction (DM-005), so a `map` task's entire contract is fixed before any worker sees
+it. The only remaining "work creates work" is D3's eager pairing, which creates `reduce` tasks
+inside the transaction that commits a partial. This buys an invariant worth stating plainly:
+**a task exists if and only if its inputs exist, so the queue only ever contains runnable
+tasks.** There is no blocked/waiting state, no DAG scheduler, no join barrier, and the claim
+query (D8, DM-007) never has to test readiness. It also means a redelivered `map` or `reduce`
+task always finds exactly the input set it had before — though on the `map` side "exists" is
+now a claim about a node we do not control, which is why the unreachable-input row above is a
+real failure mode rather than an impossible one.
 
 **Why each rejection, specifically.** *At-most-once* was rejected because it converts every
-crash into a correctness incident and can discard 3,125 files of completed work in one lost
+crash into a correctness incident and can discard 3,125 vectors of completed work in one lost
 partial. *2PC* was rejected because the object store cannot be a participant, so it does not
 actually deliver the property it promises, while adding coordinator-blocking to a fleet of W
 workers. *A membership service* was rejected because it replaces a timeout we can express in

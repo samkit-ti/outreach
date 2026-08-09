@@ -12,11 +12,11 @@
 
 The brief lists "support submitting multiple jobs even if there are ongoing jobs" as one of
 four named critical aspects in the brief, and the envelope makes the failure mode concrete: a max job
-(F=100k, C=1M) enqueues ≈25k compute tasks plus ≈2k `generate` tasks, while a small job
-(F=3) enqueues 1 `generate` task, 1 `map` task and 1 `finalize` task. Under any
-arrival-ordered discipline the small job's three tasks sit behind ~27,000 others. At W=10
-workers and ~5 s per task (a deliberately conservative round figure for this illustration; the modelled constant is 2.2 s, 01 §4) that is 27,000 × 5 s ÷ 10 ≈ 3.75 hours of queueing for a job whose
-own work is roughly 15 seconds — a slowdown factor of ~900×. The target is that a small job
+(F=100k, C=1M) enqueues ≈25k tasks, while a small job
+(F=3) enqueues 1 `map` task and 1 `finalize` task. Under any
+arrival-ordered discipline the small job's two tasks sit behind ~25,000 others. At W=10
+workers and ~5 s per task (a deliberately conservative round figure for this illustration; the modelled constant is 2.2 s, 01 §4) that is 25,000 × 5 s ÷ 10 ≈ 3.5 hours of queueing for a job whose
+own work is roughly 10 seconds — a slowdown factor of ~1,250×. The target is that a small job
 submitted behind a max job completes in seconds-to-minutes rather than hours, that the large
 job's total makespan degrades only proportionally to the capacity it lends out, and that no
 job of any size can be starved indefinitely.
@@ -50,8 +50,8 @@ What the decision has to fit inside:
 - **D7 / at-least-once with capped attempts (DM-006).** Requeued tasks re-enter the same
   ordering. A retry must not be permanently outranked by fresher work, or attempts get
   consumed by starvation instead of by real failures.
-- **Envelope reference point:** ≈25k compute tasks + ≈2k `generate` tasks per max job;
-  ⌈F/5⌉ = 20,000 leaf `map` tasks; ≈5,000 reduce tasks over ~7 levels.
+- **Envelope reference point:** ≈25k tasks per max job;
+  ⌈F/5⌉ = 20,000 leaf `map` tasks; ≈5,000 reduce tasks over ~7 levels; 1 `finalize` task.
 
 ---
 
@@ -69,8 +69,8 @@ One queue for all jobs; the next free worker takes the globally oldest `pending`
 - Perfectly predictable and easy to explain to a user: submitted first, finished first.
 
 **Cons:**
-- Convoy starvation, quantified: 27,000 tasks ahead × ~5 s ÷ 10 workers ≈ 3.75 h of pure
-  queueing for a 3-task job whose intrinsic work is ~15 s. A ~900× slowdown on the small
+- Convoy starvation, quantified: 25,000 tasks ahead × ~5 s ÷ 10 workers ≈ 3.5 h of pure
+  queueing for a 2-task job whose intrinsic work is ~10 s. A ~1,250× slowdown on the small
   job, which is a functional failure of an explicit requirement in the brief, not a tuning issue.
 - The pathology worsens with fleet size in the wrong direction: adding workers shortens the
   convoy but never reorders it, so no amount of capacity fixes head-of-line blocking.
@@ -101,14 +101,14 @@ One queue per active job; a dispatcher (or each worker) rotates across job queue
   commit and the reduce enqueue; with per-job queues in a separate broker that becomes a
   dual write across two systems — the bug class D5 exists to eliminate.
 - Round-robin over *tasks* is also the wrong granularity for our task mix: it would give a
-  `generate` task the same turn as a `finalize` task, ignoring that they sit at opposite
+  leaf `map` task the same turn as a `finalize` task, ignoring that they sit at opposite
   ends of the critical path.
 
 ### Fairness via claim-query ordering — **CHOSEN**
 
 Keep one queue (the `tasks` table). The `FOR UPDATE SKIP LOCKED` claim query orders
 candidates by `(in-flight tasks of that job ASC, task priority, age ASC)`, where priority is
-`finalize` > `reduce` > `map` > `generate`.
+`finalize` > `reduce` > `map`.
 
 **Pros:**
 - Zero new infrastructure: the policy is three terms in an `ORDER BY` on a table that
@@ -192,7 +192,7 @@ JOIN jobs j ON j.id = t.job_id
 LEFT JOIN inflight i ON i.job_id = t.job_id
 WHERE t.status = 'pending' AND j.status IN ('running','finalizing')
 ORDER BY coalesce(i.n, 0) ASC,          -- 1. fairness across jobs
-         t.priority ASC,                 -- 2. priority ASC: finalize=0 first, then reduce=1, map=2, generate=3
+         t.priority ASC,                 -- 2. priority ASC: finalize=0 first, then reduce=1, map=2
          t.created_at ASC                -- 3. age, within a job
 LIMIT 16 FOR UPDATE SKIP LOCKED;         -- window, not point: the caller updates the
                                          -- first surviving row (LLD §3)
@@ -206,23 +206,23 @@ surviving row; the enclosing UPDATE still takes exactly one (LLD §3), so one cl
 one task.
 
 Three terms, in this order, each doing a distinct job. **Note the sort direction on term 2.**
-`priority` is stored ascending-urgent — `finalize=0 < reduce=1 < map=2 < generate=3` (LLD §1) —
+`priority` is stored ascending-urgent — `finalize=0 < reduce=1 < map=2` (LLD §1) —
 so the correct clause is `priority ASC`. Writing `DESC` while describing the policy as
-"finalize > reduce > map > generate" reads plausibly and inverts the entire ordering: generate
+"finalize > reduce > map" reads plausibly and inverts the entire ordering: leaf `map`
 tasks would be claimed first and `finalize` last, which is precisely the FIFO pathology this
 ITD rejects. The prose ordering and the SQL direction are opposite by construction; the column
 comment in the DDL carries the numbering so the two cannot drift apart again.
 
 **Term 1 — in-flight count ASC: fairness across jobs.** This is least-attained-service
 scheduling with in-flight task count as the service proxy. Its effect on the motivating
-scenario: the max job saturates the fleet at 10 in-flight tasks; the small job's `generate`
-task has in-flight 0, so the *next* worker to free up takes it — not the 27,000th. Expected
-wait is one task duration (~5 s), not 3.75 hours. That is a ~2,700× improvement on the small
+scenario: the max job saturates the fleet at 10 in-flight tasks; the small job's `map`
+task has in-flight 0, so the *next* worker to free up takes it — not the 25,000th. Expected
+wait is one task duration (~5 s), not 3.5 hours. That is a ~2,500× improvement on the small
 job's completion time in exchange for the large job losing one worker-slot for the duration
-of three tasks: its makespan grows by ~15 worker-seconds out of ~135,000 (≈0.01%). The
+of two tasks: its makespan grows by ~10 worker-seconds out of ~125,000 (≈0.01%). The
 asymmetry of that trade is the whole case for the decision.
 
-**Term 2 — priority `finalize` > `reduce` > `map` > `generate`: correct within a job.** Each
+**Term 2 — priority `finalize` > `reduce` > `map`: correct within a job.** Each
 step of the ordering earns its place for a different reason:
 
 - **`finalize` first** because exactly one exists per job, it takes seconds, and it is the
@@ -241,18 +241,15 @@ step of the ordering earns its place for a different reason:
   way, which is why this term is robust to a "why not prefer map, to get more parallelism?"
   probe — extra map parallelism buys width we already have in surplus and pays for it in
   depth and storage.
-- **`map` third** because a map task's output is a partial, i.e. it *creates* reduce work.
-  It must outrank `generate` so that the reduce frontier stays fed rather than the system
-  spending all its capacity manufacturing input.
-- **`generate` last** because it is the most parallelisable and least urgent work in the
-  system: ≈2,000 mutually independent tasks (D9), no downstream task is waiting on any
-  *specific* one, and its only role is to keep the map frontier non-empty. Deferring
-  generate is also the mechanism that stops a job from materialising 800 GB of input before
-  consuming any of it. The one thing we must avoid is deferring it so hard that the map
-  frontier empties — which cannot happen here, because when no map or reduce task is
-  `pending` the generate tasks *are* the only candidates and get claimed immediately. Strict
-  priority is safe precisely because it is only consulted among simultaneously-claimable
-  tasks.
+- **`map` last** because it is the most parallelisable and least urgent work in the system:
+  20,000 mutually independent units, no downstream task is waiting on any *specific* one,
+  and its only role is to keep the reduce frontier fed. A map task's output is a partial, so
+  map work is what *creates* reduce work — but that is an argument for consuming reduce work
+  promptly, not for manufacturing more of it ahead of the frontier that already exists. The
+  one thing we must avoid is deferring map so hard that the fleet idles — which cannot happen
+  here, because when a job's only `pending` tasks are `map` tasks they *are* the only
+  candidates and get claimed immediately. Strict priority is safe precisely because it is
+  only consulted among simultaneously-claimable tasks.
 
 **Term 3 — age ASC: FIFO within a (job, priority) class.** This preserves the one genuinely
 good property of FIFO — no task is passed over forever by fresher siblings — at the level
@@ -283,9 +280,9 @@ finished.
    remaining queue depth.
 3. Therefore a job's in-flight count oscillates and its `pending` tasks are claimed within
    O(one task duration) of the fleet having capacity; no job's wait is a function of another
-   job's *queue depth*, only of the fleet's throughput. The ~900× convoy slowdown is
+   job's *queue depth*, only of the fleet's throughput. The ~1,250× convoy slowdown is
    structurally eliminated rather than merely reduced.
-4. Within a job, term 2 is a bounded strict priority over four fixed classes, and each class
+4. Within a job, term 2 is a bounded strict priority over three fixed classes, and each class
    is drained in age order by term 3. Higher-priority classes are finite and self-liquidating
    (`finalize` is one task; `reduce` tasks are created only by consuming partials, so they
    cannot be manufactured without map output), so a lower class cannot be starved by an
@@ -304,7 +301,7 @@ but it must be made deliberately, with the refresh interval treated as the new s
 bound rather than assumed away.
 
 **Why each rejection, specifically.** *Strict FIFO* was rejected on the quantified convoy:
-3.75 h of queueing for 15 s of work, unfixable by adding workers, and it schedules `finalize`
+3.5 h of queueing for 10 s of work, unfixable by adding workers, and it schedules `finalize`
 last by construction. *Per-job queues* were rejected because dynamic queue lifecycle plus
 either a shared rotation cursor (new coordination point) or wasteful empty probing is more
 moving parts than an `ORDER BY`, and moving the queue out of Postgres would break D3's
@@ -341,7 +338,7 @@ would falsify the core claim of this ITD.
 | Concurrent progress, not serialisation | With 3 jobs active, all 3 show monotonically rising progress % in the same 60 s window | SSE progress stream (D11, DM-009) sampled during the run |
 | No starvation | Over a 30-minute soak with continuous mixed-size submissions, max per-job queueing time for any task < 5 × median | Percentile report over `claimed_at − created_at` per task |
 | Fleet not idled by fairness | Worker utilisation > 90% while any `pending` task exists | Worker busy/idle events (D11, DM-009) aggregated over the run |
-| Priority ordering holds | `finalize` claimed within one task duration of becoming `pending` in ≥99% of jobs; no `reduce` task waits while a `generate` task of the same job is claimed | Event-log audit of claim order vs task type |
+| Priority ordering holds | `finalize` claimed within one task duration of becoming `pending` in ≥99% of jobs; no `reduce` task waits while a `map` task of the same job is claimed | Event-log audit of claim order vs task type |
 | Reduce frontier stays narrow | Peak unconsumed partials ≤ 2 × K × W (i.e. reduce keeps pace with map, well under the 160 GB worst case) | Max of `count(*) FROM partials WHERE consumed_by IS NULL` sampled per second |
 | Claim query cost | p99 claim latency < 50 ms at 1k tasks/sec with 10k `pending` rows | `pg_stat_statements` plus worker-side claim timing histogram |
 | Retry not starved | A requeued task (D7) is re-claimed ahead of newer tasks in its (job, priority) class in 100% of forced-expiry tests | Chaos test with reaper interval 0; assert claim order by `created_at` |

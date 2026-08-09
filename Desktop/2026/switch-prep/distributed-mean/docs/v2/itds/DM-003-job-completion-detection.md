@@ -12,7 +12,7 @@
 
 "How the system decides a job is finished" is critical aspect #3 in the brief,
 and it is hard here for one specific reason: **the task count is not known in advance.**
-A max job (F = 100k, C = 1M) produces ≈2k `generate` tasks and ≈25k compute tasks, but
+A max job (F = 100k, C = 1M) produces ≈25k compute tasks, but
 the ≈5,000 `reduce` tasks are created *dynamically* by eager pairing (D3) — how many
 there are depends on drain-mode fan-in, which depends on arrival timing, which depends
 on heterogeneous worker speeds. Meanwhile the queue is at-least-once (D7), so any
@@ -43,7 +43,7 @@ last piece of work, with no polling component and no counter that redelivery can
 - **`tasks` is the queue** (D5), so "no pending or claimed tasks for this job" is a
   plain indexed predicate over the same rows in the same transaction — not a
   cross-system query. This is the structural reason the chosen design costs nothing.
-- **Fairness ordering (D8)** prioritises `finalize` > `reduce` > `map` > `generate`, so a
+- **Fairness ordering (D8)** prioritises `finalize` > `reduce` > `map`, so a
   `finalize` enqueued by this rule is picked up promptly even under multi-job load.
 - **A UI is required** (bonus, D11) and wants per-job progress %, which is a different
   requirement from correctness and is deliberately kept separate below.
@@ -57,8 +57,10 @@ For any job, at every transaction boundary:
 
 Each task type preserves the total covered-file count:
 
-- **`generate`** creates files; it adds no partials and changes no count.
-- **`map`** consumes k ≤ 5 files and emits one partial with `count = k`.
+- **`map`** reads k ≤ 5 of the job's input vectors and emits one partial with `count = k`.
+  T1 creates all ⌈F/5⌉ map tasks at submit, chunking `inputUris[]` in list order, so every
+  one of the F files is covered by exactly one map task and the F terms of the sum are all
+  accounted for from the first transaction onward.
 - **`reduce`** consumes k ∈ [2, 5] partials with counts n₁…n_k, marks them consumed in
   the same transaction, and emits one partial with `count = Σ nᵢ`. Sum in, same sum out.
 - **`finalize`** consumes the single `count == F` partial and emits the result file.
@@ -74,9 +76,10 @@ cannot be missed, because the counts of a partition must sum to F and a partitio
 size 1 forces that element's count to F.
 
 The paired condition "no pending or claimed tasks for this job" is what closes the other
-half: it rules out the case where `count == F` is on a partial belonging to a job that
-still has `generate` work outstanding for a *later* batch, and it is the same predicate
-drain mode already evaluates in D3. Stated plainly, then: completion is a **two-part
+half: it rules out the case where the unconsumed partial set *looks* complete while `map` or
+`reduce` work for the job is still queued or in flight — a claimed-but-uncommitted task holds
+files that no partial has accounted for yet — and it is the same predicate drain mode already
+evaluates in D3. Stated plainly, then: completion is a **two-part
 predicate** — a data proof (`count == F` on the sole unconsumed partial) plus a liveness
 predicate (no pending or claimed tasks for the job) — and the second half is a **read of
 task state, not a counter**, which is exactly why at-least-once redelivery cannot corrupt
@@ -298,7 +301,7 @@ in shipped code. It logs an event and — if a `count == F` partial exists — r
 that exhausted even its 10 attempts (below).
 
 **A `dead` finalize must not fail the job.** The general rule is "a task that exhausts its
-attempts kills its job with a cause" (D7) — correct for `generate`, `map`, and `reduce`, whose
+attempts kills its job with a cause" (D7) — correct for `map` and `reduce`, whose
 work can be re-derived. It is wrong for `finalize`, and irreversibly so: at that point the
 `count == F` partial exists, so the job's entire computation is *finished* and only the divide
 remains, while `failed` is terminal and the claim query serves only `('running','finalizing')`

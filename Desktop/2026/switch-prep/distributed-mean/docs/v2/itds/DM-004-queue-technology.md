@@ -10,13 +10,13 @@
 ## Problem Statement
 
 The system needs a work queue that a **NodeJS/Express/TypeScript API** writes to and a fleet of **W Python
-workers** reads from, carrying up to **≈25k compute tasks + ≈2k `generate` tasks** for a single max-size job
-(F=100k, C=1M) — ≈27k tasks per job, with multiple jobs in flight concurrently. The queue must support: (a)
+workers** reads from, carrying up to **≈25k tasks** for a single max-size job
+(F=100k, C=1M), with multiple jobs in flight concurrently. The queue must support: (a)
 an **atomic claim-and-enqueue** in the eager-pairing step of D3, where marking ≤5 partials consumed and
 creating the resulting `reduce` task must either both happen or neither happen; (b) **leases** so a task
 claimed by a worker that crashes or hangs returns to `pending` (D7); (c) **claim ordering by mutable global
 state** — "prefer the job with the fewest in-flight tasks, then by task priority `finalize` > `reduce` >
-`map` > `generate`, then by age" (D8). We must pick one queue technology, name the honest breaking point,
+`map`, then by age" (D8). We must pick one queue technology, name the honest breaking point,
 and put it behind an interface so the breaking point is a config change rather than a rewrite.
 
 ---
@@ -34,8 +34,8 @@ and put it behind an interface so the breaking point is a config change rather t
 - **A DB is required regardless.** We need durable job/task/partial/worker/event state for D7 (state
   machine), D8 (fairness ordering), D10 (worker registry) and D11 (event log + SSE). The question is
   therefore not "DB or queue" — it is "do we add a *second* stateful system next to a DB we already have."
-- **Envelope (from CONTEXT-BRIEF):** ≈20,000 leaf `map` tasks, ≈5,000 `reduce` tasks over ~7 levels, ≈2k
-  `generate` tasks. One partial is **8 MB** binary and cannot ride in a queue message (**SQS cap 256 KB**) →
+- **Envelope (from CONTEXT-BRIEF):** ≈20,000 leaf `map` tasks, ≈5,000 `reduce` tasks over ~7 levels, one
+  `finalize` task. One partial is **8 MB** binary and cannot ride in a queue message (**SQS cap 256 KB**) →
   the queue carries **references only** in every alternative below. Message-size and raw broker-throughput
   arguments are therefore nearly irrelevant: our messages are a few hundred bytes of ids and URIs (see
   DM-005).
@@ -73,7 +73,7 @@ rows whose lease expired.
 
 **Cons:**
 - **Churn on a hot table.** Every task row is inserted, updated ≥2× (claim, complete) and heartbeat-updated;
-  ~27k tasks/job of `UPDATE`s create dead tuples and autovacuum work. Needs a fillfactor/autovacuum-tuned
+  ~25k tasks/job of `UPDATE`s create dead tuples and autovacuum work. Needs a fillfactor/autovacuum-tuned
   `tasks` table plus archival of finished jobs.
 - **Connections don't scale like a broker's.** Each worker holds a Postgres connection; past a few hundred
   workers we need PgBouncer. SQS has no connection concept.
@@ -95,7 +95,7 @@ the API. Consumer: `boto3` long-poll `ReceiveMessage`, visibility timeout as the
 - **Fully managed.** No vacuum, no reaper, no lease code, no capacity planning, no backup. Availability and
   durability are AWS's problem, and the operational surface handed to a future on-call is dramatically
   smaller.
-- **Effectively infinite scale** for standard queues — 27k tasks/job is not a number SQS notices, and it
+- **Effectively infinite scale** for standard queues — 25k tasks/job is not a number SQS notices, and it
   would still not notice at 100× that.
 - **Dead-letter queues are built in**, with `maxReceiveCount` and redrive back to the main queue. Our D7
   `dead` state is a hand-rolled version of this.
@@ -139,7 +139,7 @@ task-type priority, DLX for dead letters.
 **Pros:**
 - Real broker semantics: per-message ack/nack/reject-with-requeue, prefetch as a natural back-pressure knob,
   dead-letter exchanges, publisher confirms.
-- Priority queues can encode `finalize > reduce > map > generate` directly.
+- Priority queues can encode `finalize > reduce > map` directly.
 - Mature, well-documented clients on **both** required languages, and the management UI gives queue depth
   and consumer state for free (part of what D11 needs). Routing/topics would let us fan the same event to
   workers and a future notifier without changing producers.
@@ -220,7 +220,7 @@ stuck" in one query, worth a lot in a system whose interesting failures are stal
 **1k–10k tasks/sec**, with practitioner reports pushing a single well-tuned instance considerably further
 before a broker is warranted (<https://www.dbpro.app/blog/postgresql-skip-locked>,
 <https://medium.com/@harsh.vaghela.work/postgres-is-the-only-queue-you-need-until-50k-jobs-sec-5931611b551c>).
-Our numbers sit far below that floor: a max job is **≈27k tasks in total**, not per second, and each task is
+Our numbers sit far below that floor: a max job is **≈25k tasks in total**, not per second, and each task is
 **I/O-bound seconds** (reading up to 5 × 8 MB from the object store). A worker finishes ~0.2–2 tasks/sec, so
 even **hundreds of workers claim well under 1k tasks/sec** — one to two orders of magnitude inside the
 comfortable range, with claim batching (`n>1` per claim) as further headroom. We are not choosing Postgres
@@ -233,7 +233,7 @@ decision instead of leaving them in the alternatives column. *Churn:* `tasks` is
 `fillfactor=85` so the ≥2 in-place `UPDATE`s per row (claim, complete) plus heartbeat lease extensions
 have free space on the same page and mostly avoid page splits, and with a per-table
 `autovacuum_vacuum_scale_factor=0.02` (against the 0.2 default) so autovacuum reclaims dead tuples on a
-27k-task job long before bloat reaches the claim index. A nightly archival job moves `done`/`dead` rows
+25k-task job long before bloat reaches the claim index. A nightly archival job moves `done`/`dead` rows
 belonging to jobs completed more than 24 h ago into `tasks_archive`, so the live queue table stays
 proportional to *in-flight* work rather than to lifetime work — the queue index stays small and the
 `VACUUM` window stays short. *Idle-poll latency:* workers poll at `IDLE_POLL_MS=500` with jitter (so W
@@ -290,6 +290,6 @@ re-expression is the real cost of the move.
 | Claim starvation | 0 claimers return zero rows while ≥1 eligible task is pending | the CTE's `LIMIT 16` window makes an empty return require >16 simultaneous contended heads; assert over a W=32 burst against a 100-task queue |
 | Sustained claim rate | ≥ 500 claims/sec on a single Postgres 16 with no-op tasks (≥10× the projected real rate) | Load harness enqueues 500k no-op tasks; measure completions/sec and `pg_stat_activity` lock waits |
 | Zero lost tasks under worker loss | 100% of tasks from `kill -9`ed workers requeued within lease + reaper interval (≤ 2× lease) | Kill 50% of workers mid-job; assert job still completes with a correct result vector |
-| Fairness (D8) | A 3-task job submitted behind a 27k-task job completes in < 60 s — it does not wait for the large job | Submit F=10 job after F=100k job; compare wall-clock to the small job run alone |
+| Fairness (D8) | A 3-task job submitted behind a 25k-task job completes in < 60 s — it does not wait for the large job | Submit F=10 job after F=100k job; compare wall-clock to the small job run alone |
 | No queue bottleneck | Queue wait time < 5% of mean task service time | `claimed_at - created_at` vs `done_at - claimed_at` from the `tasks` table |
 | Adapter portability | An `SqsQueueAdapter` stub type-checks against `QueueAdapter` with no change to the worker loop | CI compile check; interface signature contains no Postgres-specific types |

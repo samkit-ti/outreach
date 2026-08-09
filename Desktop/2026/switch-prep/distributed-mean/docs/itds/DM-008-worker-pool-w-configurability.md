@@ -48,7 +48,7 @@ this ITD defines it.
 - **Deployment is the same containers twice** (`../02-hld.md`): docker-compose locally
   (API, Postgres 16, MinIO, W× Python workers, supervisor, UI), ECS Fargate on AWS (API service +
   worker service, RDS, S3, ALB). Whatever sets W must have a local and an AWS implementation.
-- **The demo has to make heterogeneity visible.** W is therefore a *stability* requirement for v1,
+- **The demo has to make heterogeneity visible.** W is therefore a *stability* requirement here,
   not just a bonus: to show that a slow worker doesn't stall a job, W must be held where the operator
   put it.
 

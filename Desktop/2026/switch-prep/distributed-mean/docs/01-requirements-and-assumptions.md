@@ -85,7 +85,7 @@ Small-job sanity check (F=10, C=1000): 2 map tasks, 1 reduce, 1 finalize — the
 
 ## 5. Out of scope (current iteration)
 
-- Job cancellation, pause/resume, priorities set by users. **Cancellation has a designed escape hatch** and is the first planned addition: add `'cancelled'` to `job_status`, and because the claim query filters on job status (`j.status IN ('running','finalizing')`), setting it stops new claims immediately while in-flight tasks drain to completion on their own — no task killing, no lease games, no partial-cleanup pass beyond the lifecycle rule that already expires `partials/`. The design permits it; v1 simply does not expose it.
+- Job cancellation, pause/resume, priorities set by users. **Cancellation has a designed escape hatch** and is the first planned addition: add `'cancelled'` to `job_status`, and because the claim query filters on job status (`j.status IN ('running','finalizing')`), setting it stops new claims immediately while in-flight tasks drain to completion on their own — no task killing, no lease games, no partial-cleanup pass beyond the lifecycle rule that already expires `partials/`. The design permits it; the current scope simply does not expose it.
 - **Input generation.** Inputs pre-exist at node-owned URIs (A-2); the system ingests references and never manufactures data. The demo's fixture seeder is a harness script, outside the system boundary.
 - **Weighted aggregation (weighted FedAvg).** The mean is unweighted. Weighting clients by sample count is a one-line evolution — partials carry `(Σwᵢ·xᵢ, Σwᵢ)` instead of `(Σxᵢ, n)`, same monoid, same tree (DM-001, DM-010) — and is not built.
 - AuthN/AuthZ, multi-tenancy, quotas.

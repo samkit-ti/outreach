@@ -4,7 +4,7 @@
 **Author:** Samkit Shah
 **Status:** DECIDED
 **Related:** DM-002 (adaptive fan-in / stragglers), DM-004 (queue), DM-005 (storage & formats), DM-006 (idempotency), DM-010 (numerical correctness), ../02-hld.md, ../CONTEXT-BRIEF.md
-**Simulation:** [Design Lab — Topology tab](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — race the eager tree against the barrier, fixed tree, and central accumulator.
+**Simulation:** [Design Lab — Topology tab](../simulator.html) — race the eager tree against the barrier, fixed tree, and central accumulator.
 
 ---
 

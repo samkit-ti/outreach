@@ -34,7 +34,7 @@ a lone partial with **count = F** is the answer.
 ## If you have 15 minutes
 
 `docs/v2/04-decision-journey.md` (Scope + Bare minimum) → `docs/v2/02-hld.md` §1–5 → `docs/v2/itds/DM-001`. Then the
-**[interactive simulator](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41)** —
+**[interactive simulator](docs/v2/simulator.html)** (open locally in a browser; Vercel deployment planned) —
 race the chosen design against its rejected alternatives (same seed, same workers).
 
 ## Current version: **v2** (see `docs/v2/CHANGELOG.md`)
@@ -72,9 +72,9 @@ on export), `research/reading-list.md`, `simulator.html` (source of the publishe
 artifact), `CHANGELOG.md`.
 
 > **Note for export:** if this tree is submitted as the take-home, drop
-> `CONTEXT-BRIEF.md`, `itds/TEMPLATE.md`, `CHANGELOG.md`, the `**Simulation:**` link
-> lines in DM-001/002/003/006/007, and this note; they are working scaffolding and
-> private tool links.
+> `CONTEXT-BRIEF.md`, `itds/TEMPLATE.md`, `CHANGELOG.md` and this note; they are working
+> scaffolding. `simulator.html` and its `**Simulation:**` links are local pages and
+> may ship.
 
 ## Planned (next phase — tracked in beads: `outreach-zjth`)
 

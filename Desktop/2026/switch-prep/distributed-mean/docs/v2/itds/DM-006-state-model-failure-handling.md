@@ -4,7 +4,7 @@
 **Author:** Samkit Shah
 **Status:** DECIDED
 **Related:** DM-001, DM-002, DM-003, DM-004, DM-005, DM-007, DM-010, `../02-hld.md`, `../CONTEXT-BRIEF.md`
-**Simulation:** [Design Lab — Scheduling tab — 'Kill a worker'](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — watch the lease expire and the task requeue.
+**Simulation:** [Design Lab — Scheduling tab — 'Kill a worker'](../simulator.html) — watch the lease expire and the task requeue.
 
 ---
 

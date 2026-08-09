@@ -6,11 +6,11 @@ heterogeneous workers, with a hard fan-in constraint of K=5 files per worker.
 The concrete setting is **federated-learning weight aggregation** — the F inputs are
 model-weight vectors that already exist on distributed nodes, submitted as
 `inputUris[]`; the system ingests references and never generates data
-(`docs/v2/00-problem-statement.md` §Setting).
+(`docs/00-problem-statement.md` §Setting).
 
 ## STATUS
 
-**Design: complete and hardened (v2.2). Implementation: not started —
+**Design: complete and hardened (). Implementation: not started —
 next phase.** Every "Success Metrics" table in the ITDs is an *acceptance target for
 the implementation*, not a measurement; numeric projections derive from the envelope in
 `01-requirements-and-assumptions.md` §4. The first code to be written (highest proof-value first): the T2
@@ -37,19 +37,16 @@ a lone partial with **count = F** is the answer.
 
 ## If you have 15 minutes
 
-`docs/v2/04-decision-journey.md` (Scope + Bare minimum) → `docs/v2/02-hld.md` §1–5 → `docs/v2/itds/DM-001`. Then the
-**[interactive simulator](docs/v2/simulator.html)** (open locally in a browser; Vercel deployment planned) —
+`docs/04-decision-journey.md` (Scope + Bare minimum) → `docs/02-hld.md` §1–5 → `docs/itds/DM-001`. Then the
+**[interactive simulator](docs/simulator.html)** (open locally in a browser; Vercel deployment planned) —
 race the chosen design against its rejected alternatives (same seed, same workers).
 
-## Current version: **v2.2** (see `docs/v2/CHANGELOG.md`)
 
 | Version | Date | Scope |
 |---|---|---|
-| v2.2 | 2026-08-10 | Scope change: inputs pre-exist (federated-learning wrapper). Generation removed end to end → 3 task types, T1 seeds all map tasks, `dedupe_key` deleted, flat 300 s deadline, read allow-list for user-supplied `inputUris`. Details in `docs/v2/CHANGELOG.md`. |
-| v2 | 2026-08-10 | 4 blockers fixed (claim-query `finalizing` hole, pairing race → per-job advisory lock, heartbeat fencing, priority inversion); result delivery decided; admission control; API idempotency; DM-011 added; numerics claim made precise. Details in `docs/v2/CHANGELOG.md`. |
 | v1 | 2026-08-09 | Initial full design: requirements, HLD, LLD, ITDs DM-001…DM-010, journey, simulator. Immutable. |
 
-## Full reading order (docs/v2/)
+## Full reading order (docs/)
 
 1. `00-problem-statement.md` — the brief, verbatim
 2. `01-requirements-and-assumptions.md` — FR/NFR, assumptions A-1…A-10, envelope + service-time model
@@ -70,14 +67,12 @@ race the chosen design against its rejected alternatives (same seed, same worker
 | DM-008 | Worker pool & W-via-API: supervisor reconciliation *(bonus 1)* |
 | DM-009 | Observability & UI: events + SSE, monotone progress *(bonus 2)* |
 | DM-010 | Numerics: float64 + tree; accuracy-neutral vs numpy |
-| DM-011 | Build vs Spark/Dask/Temporal/Celery *(v2)* |
+| DM-011 | Build vs Spark/Dask/Temporal/Celery |
 
 Supporting: `CONTEXT-BRIEF.md` (locked decisions D1–D12 — internal scaffolding, strip
 on export), `research/reading-list.md`, `simulator.html` (source of the published
-artifact), `CHANGELOG.md`.
 
 > **Note for export:** if this tree is exported for submission, drop
-> `CONTEXT-BRIEF.md`, `itds/TEMPLATE.md`, `CHANGELOG.md` and this note; they are working
 > scaffolding. `simulator.html` and its `**Simulation:**` links are local pages and
 > may ship.
 

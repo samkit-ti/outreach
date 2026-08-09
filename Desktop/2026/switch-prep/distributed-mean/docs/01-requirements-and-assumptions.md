@@ -1,6 +1,6 @@
-# Distributed Mean — Requirements & Assumptions (v2)
+# Distributed Mean — Requirements & Assumptions
 
-**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2
+**Date:** 2026-08-10 · **Author:** Samkit Shah
 
 ---
 

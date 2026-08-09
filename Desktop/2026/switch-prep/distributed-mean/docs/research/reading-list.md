@@ -1,4 +1,4 @@
-# Research & Prior Art — Reading List (v2)
+# Research & Prior Art — Reading List
 
 Grounding material for the trade-offs argued in the ITDs. Skim before the follow-up
 discussion; each entry notes which decision it backs.

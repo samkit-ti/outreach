@@ -1,6 +1,6 @@
-# Distributed Mean — High-Level Design (v2)
+# Distributed Mean — High-Level Design
 
-**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2
+**Date:** 2026-08-10 · **Author:** Samkit Shah
 **Reads with:** `01-requirements-and-assumptions.md` · decisions justified in `itds/DM-001…DM-011`
 
 ---
@@ -221,7 +221,7 @@ flowchart LR
   loop is unchanged in shape (DM-008).
 - RDS Multi-AZ gives control-plane HA; S3 gives 11-nines data durability; workers and
   API are cattle.
-- **Deliberately NOT SQS in v1** — the eager-pairing step needs `{consume partials +
+- **Deliberately NOT SQS** — the eager-pairing step needs `{consume partials +
   create reduce task}` to be atomic; in Postgres that's one transaction, with SQS it's
   a dual-write requiring an outbox. At ~25k tasks/job and I/O-bound tasks, claim rate
   is «1k/s — far inside Postgres territory. The switch trigger (>5k tasks/s sustained,
@@ -257,7 +257,7 @@ flowchart LR
 ## 9. Security & ops notes (current scope)
 
 No authn/authz (A-4) — which makes `PATCH /system/workers` an unauthenticated
-fleet-wide control in v1/v2; acceptable at this scope, named here so it's a
+fleet-wide control in the current scope; acceptable at this scope, named here so it's a
 choice. Secrets via env/SSM; S3 bucket private with IAM task roles; pre-signed result
 URLs expire in 15 minutes. **SSRF posture — this is where the setting adds real attack
 surface:** `inputUris[]` is user-supplied, so an unguarded fetcher would be an SSRF

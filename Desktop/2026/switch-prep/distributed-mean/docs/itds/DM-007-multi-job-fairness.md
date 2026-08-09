@@ -148,7 +148,7 @@ Give each job a weight or priority class; allocate worker slots proportionally.
 - Composes with the chosen mechanism — a weight is one more term in the same `ORDER BY`.
 
 **Cons:**
-- Requires product semantics that do not exist in v1: there is no tenant model, no billing
+- Requires product semantics that do not exist at this scope: there is no tenant model, no billing
   tier, and no authenticated user, so any weight would be an unvalidated client-supplied
   integer — an obvious priority-inflation vector where every caller sets max.
 - Weighted schemes need anti-starvation machinery of their own (ageing, minimum service

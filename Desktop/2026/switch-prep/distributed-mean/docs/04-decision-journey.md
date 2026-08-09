@@ -1,6 +1,6 @@
 # Distributed Mean — Decision Index
 
-**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2
+**Date:** 2026-08-10 · **Author:** Samkit Shah
 
 Every design decision as a question → the chosen answer with one line of reasoning →
 the alternatives, one line each. Full arguments, proofs, and trade-off analysis live

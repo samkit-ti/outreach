@@ -1,6 +1,6 @@
-# Distributed Mean — Low-Level Design (v2)
+# Distributed Mean — Low-Level Design
 
-**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2
+**Date:** 2026-08-10 · **Author:** Samkit Shah
 **Reads with:** `02-hld.md` (architecture & rationale) · ITDs for decisions
 
 ---
@@ -336,7 +336,7 @@ BEGIN;
 
   IF task.type = 'finalize':
     UPDATE jobs SET status='completed', result_uri=$uri, completed_at=now()
-      WHERE id=$jobId AND status='finalizing';       -- fenced job-state CAS (v2)
+      WHERE id=$jobId AND status='finalizing';       -- fenced job-state CAS
 COMMIT;
 ```
 
@@ -550,7 +550,7 @@ Execution discipline that makes everything else true:
 | `PATCH /system/workers` | `{desired}` | `200 {desired}` | bonus: writes `system_config`; supervisor reconciles (DM-008) |
 | `GET /events` | SSE | `text/event-stream` | tails `events` table (`id > Last-Event-ID AND ts < now() - interval '1 second'` — the visibility lag is the resume guarantee, §1) (DM-009) |
 
-**API conventions (v2):** request validation with zod at the edge, mirroring the DDL
+**API conventions:** request validation with zod at the edge, mirroring the DDL
 CHECKs; error bodies `{error:{code,message,details}}`; `400` malformed / `422`
 out-of-range or an input URI that is unparseable, duplicated, or outside
 `INPUT_URI_ALLOWLIST` (the `details` field names the offending URI) / `409`
@@ -561,7 +561,7 @@ submit path, exactly the serialization the design refuses — so existence and l
 checked at read, where the failure has a retry path and an owner (§5, T4). Completion is discovered via the
 `job.completed` SSE event or polling `GET /jobs/:id`; webhooks are out of scope (no
 authenticated caller to sign to). "Jobs queued" (bonus metric) = running jobs with ≥1
-pending task and 0 in flight. Cancellation is out of scope for v1/v2 but designed:
+pending task and 0 in flight. Cancellation is out of scope but designed:
 `UPDATE jobs SET status='cancelled'` — the claim query already filters on job status,
 so in-flight tasks drain and nothing new is claimed.
 

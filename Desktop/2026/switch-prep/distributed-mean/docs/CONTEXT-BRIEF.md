@@ -1,10 +1,10 @@
-# v2 Context Brief — Locked Decisions & Canonical Vocabulary
+# Context Brief — Locked Decisions & Canonical Vocabulary
 
 > Single source of truth for these documents (HLD, LLD, ITDs). Every ITD must be
 > consistent with this brief. If an ITD author believes a locked decision is wrong,
 > flag it in the ITD's "failure condition" section — do not silently diverge.
 
-**Version:** v2 · **Date:** 2026-08-10 · **Author:** Samkit Shah
+**Date:** 2026-08-10 · **Author:** Samkit Shah
 
 ---
 
@@ -49,7 +49,7 @@ multiple of 5). Divide by F exactly once, in `finalize`. → ITD DM-001, DM-010
 
 **D3 — Adaptive fan-in ("eager pairing").** On partial commit, inside the same DB
 transaction — **serialised per job by `pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`, with
-plain `FOR UPDATE ORDER BY created_at` on partials and no `SKIP LOCKED` there (v2 hardening:
+plain `FOR UPDATE ORDER BY created_at` on partials and no `SKIP LOCKED` there (hardening:
 `SKIP LOCKED` let two concurrent committers each undercount the partial set and each decline to
 pair, stranding partials permanently)** — if ≥5 unconsumed partials for the job → atomically
 claim 5, enqueue a reduce. If the job has no other tasks pending/running and ≥2 partials remain → reduce
@@ -99,14 +99,13 @@ query orders candidate tasks by (in-flight tasks of that job ASC, task priority,
 Priority: `finalize` > `reduce` > `map` (draining reduces shortens the
 critical path and frees partials). Effect: a 25k-task job and a 2-task job make
 concurrent progress; no starvation. Rejected: strict FIFO (starvation), weighted fair
-queuing with configurable weights (over-engineering for v1, noted as evolution). → ITD DM-007
+queuing with configurable weights (over-engineering at this scope, noted as evolution). → ITD DM-007
 
-**D9 — WITHDRAWN (inputs pre-exist).** This slot held "input generation is itself
-distributed". The system no longer generates inputs: they are model-weight vectors that
-already exist on the nodes, submitted as `inputUris[]`, and **T1 creates all ⌈F/5⌉ `map`
-tasks in the submit transaction** by chunking that list by K in list order — so no task
-spawns another and there is no `dedupe_key`. The number is kept withdrawn rather than
-reused, so D1–D12 citations elsewhere stay stable. → LLD §4 T1, DM-006
+**D9 — Inputs pre-exist at node-owned S3-API URIs; the system never generates data.**
+All ⌈F/5⌉ map tasks are created in the submission transaction, chunked from
+`inputUris[]` in list order; no task ever spawns a map task and no spawn-dedupe
+mechanism exists or is needed. → covered in DM-005/DM-006, LLD §4 T1
+
 
 **D10 — Workers: Python 3.12 single-loop processes; W reconciled by a supervisor.**
 Worker loop: claim → heartbeat → execute → commit (all state transitions
@@ -127,7 +126,7 @@ pairwise-summation variant: the worst-case rounding bound is O(log₅F · ε) vs
 *naive serial* accumulation — so the distributed design is **accuracy-neutral versus a
 real single-node `numpy.mean`** (numpy already pairwise-sums internally) and ~10⁴× tighter
 than a naive serial loop only. The claim is "distribution costs us nothing in accuracy",
-not "distribution beats numpy" (v2 reframing). Kahan summation evaluated and rejected as
+not "distribution beats numpy" . Kahan summation evaluated and rejected as
 unnecessary at these bounds (documented). → ITD DM-010
 
 ## Deployment story

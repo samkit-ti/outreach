@@ -4,6 +4,7 @@
 **Author:** Samkit Shah
 **Status:** DECIDED
 **Related:** DM-001 (aggregation topology), DM-004 (queue substrate), DM-006 (state machine & failure), DM-007 (multi-job fairness), DM-010 (numerics), `../02-hld.md`, `../CONTEXT-BRIEF.md`
+**Simulation:** [Design Lab — Scheduling tab](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — pull vs push under heterogeneous speeds; drain-mode off shows the tail deadlock.
 
 ---
 

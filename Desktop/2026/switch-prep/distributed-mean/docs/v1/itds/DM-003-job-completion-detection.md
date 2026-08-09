@@ -4,6 +4,7 @@
 **Author:** Samkit Shah
 **Status:** DECIDED
 **Related:** DM-001 (aggregation topology), DM-002 (work distribution & stragglers), DM-004 (queue substrate), DM-006 (state machine & failure), DM-007 (multi-job fairness), DM-009 (observability), `../02-hld.md`, `../CONTEXT-BRIEF.md`
+**Simulation:** [Design Lab — Topology tab (event log)](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — the log prints the count==F proof firing at each lane's completion.
 
 ---
 

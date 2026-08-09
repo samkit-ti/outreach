@@ -4,6 +4,7 @@
 **Author:** Samkit Shah
 **Status:** DECIDED
 **Related:** DM-002, DM-003, DM-004, DM-005, DM-006, `../02-hld.md`, `../CONTEXT-BRIEF.md`
+**Simulation:** [Design Lab — Fairness tab](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — FIFO convoy vs least-in-flight with a big and a small job.
 
 ---
 

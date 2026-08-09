@@ -33,7 +33,7 @@ a lone partial with **count = F** is the answer.
 
 ## If you have 15 minutes
 
-`docs/v2/02-hld.md` §1–5 → `docs/v2/itds/DM-001` → `DM-003`. Then the
+`docs/v2/04-decision-journey.md` (Scope + Bare minimum) → `docs/v2/02-hld.md` §1–5 → `docs/v2/itds/DM-001`. Then the
 **[interactive simulator](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41)** —
 race the chosen design against its rejected alternatives (same seed, same workers).
 
@@ -46,11 +46,11 @@ race the chosen design against its rejected alternatives (same seed, same worker
 
 ## Full reading order (docs/v2/)
 
-1. `00-problem-statement.md` — the prompt, verbatim
+1. `00-problem-statement.md` — the brief, verbatim
 2. `01-requirements-and-assumptions.md` — FR/NFR, assumptions A-1…A-9, envelope + service-time model
-3. `02-hld.md` — architecture, diagrams, why-not-Spark, failure modes, AWS story
-4. `03-lld.md` — schema, claim SQL, the three transactions, worker loop, API spec, runbook
-5. `04-decision-journey.md` — every decision by delivery tier (Scope → Bare minimum → MVP → Edge cases → Optimizations), question-framed with proofs and refs
+3. `04-decision-journey.md` — every decision by delivery tier (Scope → Bare minimum → MVP → Edge cases → Optimizations), question-framed with proofs and refs
+4. `02-hld.md` — architecture, diagrams, why-not-Spark, failure modes, AWS story
+5. `03-lld.md` — schema, claim SQL, the three transactions, worker loop, API spec, runbook
 6. `itds/` — one decision record per load-bearing choice:
 
 | ITD | Decision |

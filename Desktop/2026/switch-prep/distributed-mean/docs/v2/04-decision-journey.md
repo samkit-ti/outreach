@@ -91,6 +91,15 @@ send-then-commit double-counts sums), while in Postgres it is one transaction. L
 is ~27k tasks per maximal job at seconds each — well inside a single table's range.
 → [DM-004](itds/DM-004-queue-technology.md), claim SQL in [LLD §3](03-lld.md)
 
+**How is idle time kept low when workers run at very different speeds?**
+By the pull model itself: a worker holds work only while executing it, so a 3× faster
+worker simply claims 3× as often — proportional load with no speed estimation, no
+rebalancing, and no scheduler component. A slow-but-alive worker's blast radius is
+exactly one task (~seconds), independent of F; and because combination tasks are
+created eagerly, fast workers combine finished partials while slow workers are still
+mapping. A worker idles only when zero eligible tasks exist system-wide.
+→ [DM-002](itds/DM-002-work-distribution-stragglers.md)
+
 **Where do the bytes live?**
 An S3-API object store (MinIO locally, S3 on AWS); the queue and database carry URIs
 only. An 8 MB partial exceeds queue-message limits by ~32×. Inputs are CSV; partials
@@ -315,3 +324,15 @@ configuration change, not a rewrite.
 | Combine worker outputs into final file | Bare minimum | DM-001, DM-010 |
 | **Bonus:** W via API | MVP | DM-008 |
 | **Bonus:** live UI | MVP | DM-009 |
+
+## The design in one breath
+
+> Element-wise mean is a monoid fold, so workers exchange (sum, count) partials that
+> any worker can merge in any order; the 5-file RAM limit applies to partials too,
+> forcing a 5-ary reduction tree that is never pre-built — reduces are enqueued
+> eagerly as partials appear, so fast workers reduce while slow ones map. Completion
+> is the conservation proof that a lone partial with count = F is the answer. The
+> queue is Postgres SKIP LOCKED because consume-and-enqueue must be one transaction;
+> retries are harmless because every output key is deterministic; fairness is an
+> ORDER BY; W is a supervisor reconciling a number the API writes; and the UI streams
+> SSE with a progress bar that cannot move backwards.

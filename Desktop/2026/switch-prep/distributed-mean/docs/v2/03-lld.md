@@ -417,4 +417,3 @@ the demo must exercise the same concurrency the design argues about.
    count ≈ proportional, total idle time ≈ 0 while eligible tasks exist.
 5. **Fairness demo:** submit F=5000 job, then F=8 job 5 s later → F=8 completes far
    earlier (claim-order round-robin), both progress concurrently in UI.
-```

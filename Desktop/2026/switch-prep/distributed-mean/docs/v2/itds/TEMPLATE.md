@@ -1,6 +1,6 @@
 # ITD: [DM-NNN] — [Short Title]
 
-**Date:** 2026-08-09
+**Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
 **Related:** [ITD ids, ../02-hld.md, ../CONTEXT-BRIEF.md]
@@ -16,7 +16,7 @@ CONTEXT-BRIEF envelope — no vague "improve/optimize".]
 
 ## Context
 
-[What the decision-maker needs to know: constraints from the prompt (K=5 fan-in,
+[What the decision-maker needs to know: constraints from the brief (K=5 fan-in,
 heterogeneous worker speeds, multi-job requirement), envelope numbers, interactions
 with other locked decisions.]
 

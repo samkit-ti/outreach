@@ -38,7 +38,7 @@ Constraints that bind this decision:
   hold job state in memory.
 - **The queue cannot carry data.** An 8 MB partial does not fit an SQS message (256 KB cap),
   so the queue carries references and bytes live in the object store (D5, D6 → DM-004, DM-005).
-- **"How the system decides a job is finished" is named a critical aspect in the brief** (aspect #3). A topology
+- **"How the system decides a job is finished" is critical aspect #3 in the brief.** A topology
   that makes completion a property of the *data* is worth more than one that makes it a
   property of a bookkeeping counter.
 - F is user-chosen and **not** guaranteed to be a multiple of 5. F = 12 is a legal job.
@@ -125,7 +125,7 @@ One process holds a single C-length float64 accumulator (`sum_vector`) plus a co
 - **It makes the API stateful.** The accumulator lives in process memory, so an API restart
   mid-job loses it unless it is checkpointed — and a checkpointed per-job accumulator vector
   *is* the `partials` store, re-invented with worse ergonomics. It also breaks the deployment
-  story (D: ECS API service behind an ALB, ≥2 tasks): correct routing would need per-job
+  story (HLD §6: ECS API service behind an ALB, ≥2 tasks): correct routing would need per-job
   sticky sessions or a leader election.
 - **It violates the spirit of the K = 5 constraint.** The letter is satisfied (the node holds
   one vector and streams). But "≤5 files at a time" is a stand-in for "you may not assume one

@@ -227,7 +227,7 @@ row and object metadata). **Result: CSV**, mirroring the input format.
 **Key layout:**
 
 ```
-jobs/{jobId}/inputs/{batchId}/{fileIndex}.csv     # one value per line, uniform [0,1)
+jobs/{jobId}/inputs/{fileIdx}.csv     # one value per line, uniform [0,1)
 jobs/{jobId}/partials/{taskId}.f64                # C × little-endian float64, no header
 jobs/{jobId}/result.csv                           # C means, one per line
 ```

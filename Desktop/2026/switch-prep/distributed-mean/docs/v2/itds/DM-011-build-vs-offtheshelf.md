@@ -3,7 +3,7 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Related:** DM-001 (topology), DM-003 (completion), DM-004 (queue), DM-008 (worker runtime — rejects Celery/RQ/Ray for the *worker* layer), ../02-hld.md §1, ../CONTEXT-BRIEF.md
+**Related:** DM-001 (topology), DM-003 (completion), DM-004 (queue), DM-008 (worker runtime — rejects Celery/RQ/Ray for the *worker* layer), ../02-hld.md, ../CONTEXT-BRIEF.md
 
 ---
 
@@ -56,7 +56,7 @@ equivalent; the API submits applications to a cluster.
 - Violates the fixed component list (no Express/TS API in front of a queue of our
   choosing; workers are executors, not "Python workers waiting on a queue").
 - Spark's driver/executor model assumes homogeneous, co-scheduled executors; the
-  prompt explicitly withdraws that assumption (heterogeneous speeds is a evaluated
+  brief explicitly withdraws that assumption (heterogeneous speeds is an evaluated
   scenario, handled by pull-based claiming in our design, DM-002).
 - Cluster operational weight (driver HA, shuffle service, YARN/K8s) dwarfs the system
   it replaces at this scale.
@@ -159,5 +159,5 @@ adoption drops below the cost of owning DM-006's failure matrix.
 | Checkpoint | Target | How measured |
 |-----------|--------|--------------|
 | The framing question lands pre-empted | "Why not Spark?" is answered in the HLD opening section | present in 02-hld.md |
-| Owned-complexity honesty | The cost of building — owning fencing, token rotation, and pairing races — is stated, not hidden | CHANGELOG referenced in this ITD |
+| Owned-complexity honesty | The cost of building — owning fencing, token rotation, and pairing races — is stated, not hidden | the Cons list of the chosen alternative in this ITD |
 | Boundary discipline | No second stateful coordination system appears in the design | component inventory in HLD §2 |

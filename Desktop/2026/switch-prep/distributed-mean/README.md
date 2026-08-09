@@ -1,15 +1,15 @@
-# Distributed Mean — System Design Take-Home
+# Distributed Mean — Distributed Aggregation System Design
 
-Design + (upcoming) implementation for the "Distributed Mean" interview problem:
+Design + (upcoming) implementation for the "Distributed Mean" problem:
 compute the index-wise mean of F files × C random numbers across a fleet of W
 heterogeneous workers, with a hard fan-in constraint of K=5 files per worker.
 
 ## STATUS
 
-**Design: complete and adversarially reviewed (v2). Implementation: not started —
+**Design: complete and hardened (v2). Implementation: not started —
 next phase.** Every "Success Metrics" table in the ITDs is an *acceptance target for
-the implementation*, not a measurement; numeric projections derive from the envelope
-in `01 §4`. The first code to be written (highest proof-value first): the T2
+the implementation*, not a measurement; numeric projections derive from the envelope in
+`01-requirements-and-assumptions.md` §4. The first code to be written (highest proof-value first): the T2
 eager-pairing transaction + claim query with a two-connection concurrency test,
 then the worker loop, then the API.
 
@@ -20,9 +20,9 @@ merge in any order; the 5-file RAM limit applies to partials too, forcing an eag
 **5-ary reduction tree** through the queue; completion is the conservation proof that
 a lone partial with **count = F** is the answer.
 
-## How each graded criterion is answered
+## How each critical aspect is answered
 
-| Interviewer's criterion | Answer | Where |
+| Brief's criterion | Answer | Where |
 |---|---|---|
 | F > 5 ⇒ no 1:1 job↔queue-item | job explodes into generate/map/reduce/finalize tasks on one queue | DM-001, HLD §3 |
 | Efficient distribution | pull-based claiming + eager adaptive fan-in (straggler-proof) | DM-002 |
@@ -41,7 +41,7 @@ race the chosen design against its rejected alternatives (same seed, same worker
 
 | Version | Date | Scope |
 |---|---|---|
-| v2 | 2026-08-10 | Hardened after two adversarial review passes: 4 blockers fixed (claim-query `finalizing` hole, pairing mutual-decline race → per-job advisory lock, heartbeat fencing, priority inversion), result delivery decided, admission control, API idempotency, DM-011 added, numerics claim made honest. 44 findings triaged. |
+| v2 | 2026-08-10 | 4 blockers fixed (claim-query `finalizing` hole, pairing race → per-job advisory lock, heartbeat fencing, priority inversion); result delivery decided; admission control; API idempotency; DM-011 added; numerics claim made precise. Details in `docs/v2/CHANGELOG.md`. |
 | v1 | 2026-08-09 | Initial full design: requirements, HLD, LLD, ITDs DM-001…DM-010, journey, simulator. Immutable. |
 
 ## Full reading order (docs/v2/)
@@ -71,7 +71,7 @@ Supporting: `CONTEXT-BRIEF.md` (locked decisions D1–D12 — internal scaffoldi
 on export), `research/reading-list.md`, `simulator.html` (source of the published
 artifact), `CHANGELOG.md`.
 
-> **Note for export:** if this tree is submitted as the take-home, drop
+> **Note for export:** if this tree is exported for submission, drop
 > `CONTEXT-BRIEF.md`, `itds/TEMPLATE.md`, `CHANGELOG.md` and this note; they are working
 > scaffolding. `simulator.html` and its `**Simulation:**` links are local pages and
 > may ship.

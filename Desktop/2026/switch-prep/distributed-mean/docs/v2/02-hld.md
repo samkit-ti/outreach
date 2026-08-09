@@ -182,9 +182,9 @@ worker's lease expires, the reaper flips the task back to `pending`, and because
 task writes to a **deterministic object key**, the retry overwrites harmlessly.
 At-least-once delivery + idempotent effects ≡ effectively-once outcome.
 
-## 5. How each evaluated "critical aspect" is answered
+## 5. How each critical aspect is answered
 
-| Prompt's criterion | Design answer |
+| Brief's criterion | Design answer |
 |---|---|
 | F > 5, no 1:1 job↔queue-item | Job explodes into ~F/50 generate + F/5 map + dynamic reduce tasks on one queue (§3). |
 | Efficient distribution | Pull-based claiming (self-balancing under heterogeneous speeds) + adaptive fan-in + priority `finalize>reduce>map>generate` (DM-002, DM-007). |
@@ -248,7 +248,7 @@ flowchart LR
 ## 9. Security & ops notes (current scope)
 
 No authn/authz (A-4) — which makes `PATCH /system/workers` an unauthenticated
-fleet-wide control in v1/v2; acceptable for the take-home, named here so it's a
+fleet-wide control in v1/v2; acceptable at this scope, named here so it's a
 choice. Secrets via env/SSM; S3 bucket private with IAM task roles; pre-signed result
 URLs expire in 15 minutes. SSRF posture: all object URIs are system-generated from
 `jobs/{jobId}/…` templates, never user-supplied (`inputUris` accepted only from the
@@ -264,6 +264,5 @@ logs to stdout → CloudWatch.
 |---|---|
 | `01-requirements-and-assumptions.md` | FR/NFR, assumptions A-1…A-9, envelope, service-time model |
 | `03-lld.md` | schema DDL, claim SQL, transactions, worker loop, API spec, formats, runbook |
-| `04-decision-journey.md` | the incremental derivation, step by step with proofs |
+| `04-decision-journey.md` | the decision index: question → chosen answer → alternatives, tiered Scope → Bare minimum → MVP → Optimizations → Edge cases |
 | `itds/DM-001…DM-011` | one decision record per load-bearing choice |
-| `CHANGELOG.md` | what the adversarial review found and what v2 fixed |

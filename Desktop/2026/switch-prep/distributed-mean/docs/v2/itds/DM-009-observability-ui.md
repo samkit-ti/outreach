@@ -33,8 +33,8 @@ event log and no UI.
   max job, so a design that pushes one frame per transition pushes ~50k frames.
 - **The DB already holds the truth.** The `tasks` table *is* the queue (D5), and every transition is
   transactional (D7). Anything the UI shows must be derived from committed DB state, never from a
-  worker's in-memory belief — otherwise the UI and the completion logic can disagree, and completion
-  is a critical aspect in the brief.
+  worker's in-memory belief — otherwise the UI and the completion logic can disagree, and how
+  completion is decided is a named critical aspect in the brief.
 - **Workers report liveness by heartbeat** into the `workers` table (D10/DM-008), 10 s interval,
   30 s lease, 5 s reaper sweep (worst-case detection 35 s, DM-006). `free`/`busy` is `current_task IS NULL` among rows with
   `last_heartbeat > now() − 30 s`. **W** has a *desired* value (`system_config.desired_workers`)

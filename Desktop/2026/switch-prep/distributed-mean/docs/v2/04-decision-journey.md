@@ -82,8 +82,8 @@ as often; a slow worker's blast radius is one task regardless of F. [DM-002](itd
 
 **Where do the bytes live?**
 → **S3-API object store (MinIO local / S3 on AWS); queue and DB carry URIs; CSV in,
-raw float64 partials** — an 8 MB partial exceeds message limits ~32×; binary halves
-size and eliminates parsing in both languages. [DM-005](itds/DM-005-data-placement-and-format.md)
+raw float64 partials** — an 8 MB partial exceeds message limits ~32×; binary is 2.5× smaller
+than CSV and eliminates parsing in both languages. [DM-005](itds/DM-005-data-placement-and-format.md)
 - *API-local filesystem*: permitted by the brief but single-node — no fleet story.
 - *NFS/EFS*: multi-node but weak consistency/throughput for this pattern.
 - *In the DB or in messages*: puts the data plane on the control plane; dies at 8 MB × 25k objects.
@@ -110,7 +110,7 @@ observability, both bonuses. Acceptance: operability.
 
 **Several jobs at once — who gets the workers?**
 → **Least-served job first, via the claim query's ORDER BY (in-flight ASC, priority,
-age)** — a 4-task job behind a 27k-task job finishes in its own work time; the big
+age)** — a 3-task job behind a 27k-task job finishes in its own work time; the big
 job loses ~0.01%. [DM-007](itds/DM-007-multi-job-fairness.md)
 - *FIFO*: hours of convoy for seconds of work; more workers never reorder it.
 - *Per-job queues*: dynamic queue management for what one ORDER BY does.
@@ -182,6 +182,7 @@ ALB** — a configuration change, not a rewrite. [HLD §6](02-hld.md) *(no conte
 - **Kahan/compensated summation** — if value bounds widen; doubles partial size and level-0 traffic. [DM-010](itds/DM-010-numerical-correctness.md)
 - **Queue-depth autoscaling of W** — if user-set W is relaxed for cost/latency targets. [DM-008](itds/DM-008-worker-pool-w-configurability.md)
 - **Weighted fairness** — when tenants or priority classes appear; the ORDER BY generalises. [DM-007](itds/DM-007-multi-job-fairness.md)
+- **Prometheus/Grafana metrics stack** — at production scale, replacing events-table diagnostics with proper SLI/SLO material. [DM-009](itds/DM-009-observability-ui.md)
 - **Storage lifecycle** — always-on operation: GC intermediates on completion, archive finished task rows nightly. [DM-004](itds/DM-004-queue-technology.md), [DM-005](itds/DM-005-data-placement-and-format.md)
 
 ---

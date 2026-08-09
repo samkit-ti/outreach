@@ -1,4 +1,4 @@
-# Research & Prior Art — Reading List (v1)
+# Research & Prior Art — Reading List (v2)
 
 Grounding material for the trade-offs argued in the ITDs. Skim before the follow-up
 discussion; each entry notes which decision it backs.
@@ -41,7 +41,7 @@ discussion; each entry notes which decision it backs.
 ## Adjacent systems worth name-dropping accurately
 
 - **Hadoop/Spark tree aggregation** — `treeReduce`/`treeAggregate` exist precisely
-  because flat reduce at the driver bottlenecks: our D1-C rejection in production form.
-- **Celery chord** — the two-phase barrier we rejected (DM-001-b) as a library primitive.
+  because flat reduce at the driver bottlenecks: our DM-001 central-accumulator rejection in production form.
+- **Celery chord** — the two-phase barrier we rejected (DM-001, "Two-phase map-then-reduce with a barrier") as a library primitive.
 - **MPI allreduce** — the HPC answer; assumes homogeneous, reliable nodes — exactly the
-  assumptions this prompt withdraws (heterogeneous speeds, crash tolerance).
+  assumptions the brief withdraws (heterogeneous speeds, crash tolerance).

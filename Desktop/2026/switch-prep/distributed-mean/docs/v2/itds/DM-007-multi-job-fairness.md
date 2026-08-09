@@ -11,11 +11,11 @@
 ## Problem Statement
 
 The brief lists "support submitting multiple jobs even if there are ongoing jobs" as one of
-four named a critical aspect in the brief aspects, and the envelope makes the failure mode concrete: a max job
+four named critical aspects in the brief, and the envelope makes the failure mode concrete: a max job
 (F=100k, C=1M) enqueues ≈25k compute tasks plus ≈2k `generate` tasks, while a small job
 (F=3) enqueues 1 `generate` task, 1 `map` task and 1 `finalize` task. Under any
 arrival-ordered discipline the small job's three tasks sit behind ~27,000 others. At W=10
-workers and ~5 s per task that is 27,000 × 5 s ÷ 10 ≈ 3.75 hours of queueing for a job whose
+workers and ~5 s per task (a deliberately conservative round figure for this illustration; the modelled constant is 2.2 s, 01 §4) that is 27,000 × 5 s ÷ 10 ≈ 3.75 hours of queueing for a job whose
 own work is roughly 15 seconds — a slowdown factor of ~900×. The target is that a small job
 submitted behind a max job completes in seconds-to-minutes rather than hours, that the large
 job's total makespan degrades only proportionally to the capacity it lends out, and that no

@@ -130,5 +130,5 @@ unnecessary at these bounds (documented). → ITD DM-010
 2. Use the vocabulary above verbatim (job/task/partial/K/W/F/C).
 3. Quote the envelope numbers from this brief — do not re-derive different ones.
 4. Alternatives must be real (a reasonable person could choose them) with honest cons; the chosen section must make a positive case AND state a failure condition (what would make us revisit).
-5. Cross-reference related ITDs by id (DM-001…DM-010) and the HLD (`../02-hld.md`).
+5. Cross-reference related ITDs by id (DM-001…DM-011) and the HLD (`../02-hld.md`).
 6. Every claim should survive a "why not X?" probe — write nothing that cannot be defended in a follow-up discussion.

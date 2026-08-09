@@ -252,7 +252,7 @@ rather than to data loss. Correctness never depends on the drain completing; onl
 `idle` / `busy` (busy ⇔ `current_task IS NOT NULL`) / `draining`; and the resulting gap rendered
 as `reconciling…`. The `workers` row also carries `tasks_completed` and `started_at`, so per-worker
 throughput is derivable — which is how heterogeneity becomes visible on screen. For a reproducible
-demo, worker heterogeneity is injected by env var (`WORKER_SLOWDOWN_FACTOR`) rather than hoped for.
+demo, worker heterogeneity is injected by env var (`SPEED_FACTOR`) rather than hoped for.
 Stale rows are marked `gone` by the same reaper that expires leases (DM-006) — one sweeper, two
 responsibilities, no extra process.
 
@@ -290,6 +290,6 @@ exceed ~32, where per-worker DB connections start pressing RDS `max_connections`
 | Graceful scale-down | 8 → 4 mid-job: zero tasks requeued by the reaper | no `task.lease_expired` events in the drain window |
 | Crash isolation | `kill -9` one worker → exactly 1 task requeued, others keep committing | reaper log + `events` rows |
 | W=0 | queue depth grows, no component errors; W=4 then drains the job | UI queue-depth panel |
-| Straggler absorption | one worker at `SLOWDOWN=5` still completes ≥1 task; job wall-clock within 1.25× of the homogeneous run | two F=1000 runs compared |
+| Straggler absorption | one worker at `SPEED_FACTOR=5` still completes ≥1 task; job wall-clock within 1.25× of the homogeneous run | two F=1000 runs compared |
 | Per-worker footprint | RSS < 512 MB at C=1M, K=5 | `docker stats` during a `map`-heavy phase |
 | Bad input rejected | `PATCH /system/workers {desired: 10000}` → 400, `desired_workers` unchanged | API test |

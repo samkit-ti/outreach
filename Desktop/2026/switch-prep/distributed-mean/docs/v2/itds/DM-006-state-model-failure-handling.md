@@ -174,16 +174,31 @@ last checkpoint instead of restarting the task.
 
 ## Chosen: At-least-once with idempotent effects, lease-based liveness, capped attempts
 
-**The decision.** Task states are `pending → claimed → done | failed(retryable) | dead`.
-A claim sets `lease_expires_at = now() + 30s`, a per-claim `lease_token`, and
-`attempts = attempts + 1`; the worker heartbeats every 10 s to extend the lease; a reaper
-polls every 5 s and returns any task whose lease has expired to `pending`, clearing
-`worker_id` and `lease_token`. Worst-case detection latency is lease (30 s) + reaper poll
-(5 s) = 35 s. Note the reaper does **not** touch `attempts` — the counter is incremented at
-*claim* time only, so incrementing on requeue as well would double-count and burn the
-3-attempt budget in 1½ real failures. Delivery is at-least-once and every task output is
-idempotent. After 3 attempts a task becomes `dead` and its job becomes `failed` with a
-recorded cause.
+**The decision.** Task states are `pending → claimed → done | dead`. A claim sets
+`claimed_at = now()`, `deadline_at = now() + <per-type deadline>`,
+`lease_expires_at = now() + 30s`, a per-claim `lease_token`, and `attempts = attempts + 1`;
+the worker heartbeats every 10 s to extend the lease; a reaper polls every 5 s and returns
+any task whose lease has expired to `pending`, clearing `worker_id` and `lease_token`.
+Worst-case detection latency is lease (30 s) + reaper poll (5 s) = 35 s. Note the reaper does
+**not** touch `attempts` — the counter is incremented at *claim* time only, so incrementing on
+requeue as well would double-count and burn the 3-attempt budget in 1½ real failures.
+Delivery is at-least-once and every task output is idempotent. After 3 attempts a task
+becomes `dead` and its job becomes `failed` with a recorded cause — with one exception
+(`finalize`, below) that exists because failing a job whose computation is already complete is
+irreversible.
+
+**There is no transient `failed` task state, and the enum does not contain one.** A retryable
+failure — a blob GET that raised past its bounded retries, a malformed input, a bug — is
+handled by the worker requeueing its own task in a transaction fenced exactly like the commit
+(`WHERE id=$t AND lease_token=$mine AND status='claimed'`), setting `status` back to `pending`
+or, on the last attempt, straight to `dead`, and recording the cause in a `tasks.last_error`
+column (LLD §4 T4). **Requeue *is* the retry.** A separate `failed(retryable)` state would be
+a state nothing ever reads: no query selects it, the claim query would have to learn about it,
+and it would need a timer to leave. Nor is there a backoff schedule: the claim query's
+fairness ordering supplies the spacing, since a requeued task re-enters at the back of its
+job's FIFO tiebreak and its job's in-flight count no longer includes it, so other work is
+served in between. Two states plus a token is the whole failure machinery, and the same
+requeue path serves crashes (reaper-driven) and exceptions (worker-driven).
 
 **Why this is positively right, not merely least-bad.** Three properties do the work:
 
@@ -204,9 +219,16 @@ recorded cause.
 
    **The `dedupe_key` claim is narrower than it looks, and worth scoping precisely.** It
    covers exactly one case: **`generate`-spawned `map` tasks**, which have a natural key
-   (`map:{job_id}:{batch_index}`, unique-indexed where non-null), so a re-run `generate` task
+   `map:{job_id}:{file_idx_from}` (unique-indexed where non-null), so a re-run `generate` task
    re-inserting its batch's map tasks conflicts and inserts nothing — it cannot fork a
-   duplicate subtree. **`reduce` tasks have no natural key at all**: their identity is the
+   duplicate subtree. **The key must be a pure function of the payload, and that is why it is
+   the file index rather than a batch counter.** A spawn-time counter is computed fresh on each
+   attempt, so a retried `generate` would emit keys the first attempt never used, every insert
+   would succeed, and the duplicate `map` tasks' partials would push the job's total count past
+   F — turning the `count == F` end-to-end checksum from a safety net into a permanent failure.
+   The file-index form derives from the `generate` task's own `fileIdxFrom..fileIdxTo` range
+   chunked by K, which is fixed at the task's creation, so attempt 1 and attempt 2 derive
+   byte-identical keys (LLD §2). **`reduce` tasks have no natural key at all**: their identity is the
    *set of partials they consume*, which is chosen at creation time from whatever happens to
    be unconsumed, so two legitimate reduce tasks of the same job at the same tree level are
    indistinguishable by any tuple of columns. Their dedupe comes from a different mechanism —
@@ -251,8 +273,9 @@ serialize it: per D3, consumption happens **once, at reduce-task creation time**
 same transaction that inserts the reduce task:
 
 ```sql
--- inside the transaction that commits a partial (D3, DM-002)
-SELECT pg_advisory_xact_lock(hashtext($job::text));   -- serialise pairing per job
+-- inside the transaction that commits the task (D3, DM-002), and in the reaper for jobs
+-- whose tasks it requeues — the two triggers together (DM-002, DM-003)
+SELECT pg_advisory_xact_lock(hashtext('pairing'), hashtext($job::text));   -- serialise pairing per job
 WITH claimed AS (
   UPDATE partials SET consumed_by = $new_reduce_task_id
   WHERE id IN (SELECT id FROM partials
@@ -270,8 +293,8 @@ task's input set is *immutable and identical* across attempts — both workers r
 five partial ids, compute the same sum, and write the same key. Double-consume is not
 prevented at execution time; it is made unrepresentable.
 
-Two details of that statement are v2 corrections and both are load-bearing. The pairing step
-is wrapped in `pg_advisory_xact_lock(hashtext(job_id::text))`, which serialises pairing **per
+Two details of that statement are load-bearing. The pairing step
+is wrapped in `pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`, which serialises pairing **per
 job** (concurrent jobs are unaffected), and the partial select uses a plain `FOR UPDATE ORDER
 BY created_at` with **no `SKIP LOCKED`**. `SKIP LOCKED` is right for the *claim* query, where
 skipping a contended row means picking a different task; it is wrong here, where skipping a
@@ -291,7 +314,7 @@ the second committer runs on a complete, post-commit view and exactly one of the
 | Worker hangs / long GC / paused VM (zombie holding a lease) | Lease expires (the reaper cleared its token), task is requeued, two executors run concurrently for a while; the zombie's heartbeat *and* its eventual commit both match 0 rows on the `lease_token` + `status='claimed'` fence, so it discards its work | Fenced commit + fenced heartbeat + idempotent PUT. Cost is duplicated compute, not corruption |
 | Reaper crashes | Expired leases are simply not reclaimed until it restarts; nothing else degrades — claims, executions, and commits continue | Degraded liveness, never broken safety. The reaper is stateless and its action (`UPDATE … WHERE lease_expires_at < now()`) is idempotent, so we can run several instances with no leader election |
 | Postgres unavailable | Workers cannot claim, cannot heartbeat, cannot commit → the fleet quiesces within one poll interval. On recovery, in-flight leases have expired and those tasks are requeued | Nothing is lost because every transition is a transaction: an interrupted transition rolls back whole. See "why pause is fine" below |
-| Object store unavailable | Read or PUT raises; the worker marks the task `failed(retryable)` with the error, backing off 5 s then 10 s (exponential, jittered). Third failure → `dead` → job `failed` with cause | The data plane *is* the data. There is no correct way to continue without it, so failing loudly beats producing a mean over the files that happened to be readable |
+| Object store unavailable | Read or PUT raises past the client's bounded retries; the worker requeues its own task to `pending` with the cause in `last_error` (T4, fenced by its lease token). Third attempt → `dead` → job `failed` with cause | The data plane *is* the data. There is no correct way to continue without it, so failing loudly beats producing a mean over the files that happened to be readable. Requeue-is-retry means this path and the crash path are the same code |
 | API process dies | Jobs and tasks are in the DB; the API is stateless (this is precisely why D1 rejected a central accumulator on the API). Workers keep draining the queue; SSE clients reconnect (D11, DM-009) | No job state lives in API memory |
 | Poison task (deterministic bug, malformed input) | Fails identically 3 times, then `dead` → job `failed` with the recorded error | We deliberately do **not** classify transient vs deterministic failures. A misclassifier that calls a transient S3 blip "permanent" fails a 3.5 h job needlessly; three cheap attempts cost ≤3× a few seconds |
 | Duplicate `generate` task | Re-generates the same files from the same per-file seeds (D9) → byte-identical files; its `map` tasks are re-inserted under `ON CONFLICT (dedupe_key) DO NOTHING` | Determinism turns input generation into just another idempotent effect |
@@ -303,15 +326,26 @@ hung S3 `GET` on a half-open TCP connection keeps *extending* its lease indefini
 lease never expires, the reaper never sees the task, and one task is held by a process that
 will never finish it — the exact defect DM-004 charges RabbitMQ with, reintroduced through the
 back door. Two mechanisms close it. First, an **absolute deadline**: `TASK_DEADLINE_SECONDS`
-(default 300 — ~2 minutes of headroom over the ~2.2 s expected and the slowest plausible
-`generate` batch) is stamped at claim time as `deadline_at`, the heartbeat **refuses to extend
-`lease_expires_at` past it**, and the reaper reclaims any task whose `deadline_at` has passed
-*regardless of heartbeat liveness*. A lease is a renewable permission; a deadline is not
-renewable, which is the whole point. Second, **the blob-store client cannot hang in the first
-place**: `connect_timeout=5s`, `read_timeout=30s`, bounded retries (3, jittered exponential)
-on the boto3 config, so a stalled socket raises rather than blocks and the task takes the
-ordinary `failed(retryable)` path. Belt and braces on purpose — the timeouts stop the common
-case, the deadline bounds *every* case including ones we have not thought of.
+is stamped at claim time as `deadline_at`, the heartbeat **refuses to extend `lease_expires_at`
+past it** (`… AND lease_expires_at < deadline_at`, entirely server-side), and the reaper
+reclaims any task whose `deadline_at` has passed *regardless of heartbeat liveness*. A lease is
+a renewable permission; a deadline is not renewable, which is the whole point.
+
+**The deadline is per task type, because the types are not comparable.** For `map`, `reduce`,
+and `finalize` it is 300 s — vast headroom over the ~2.2 s service-time constant. For
+`generate` it is 1800 s, and one number forces that split: a `generate` task writes
+`GEN_BATCH=50` files of ~20 MB, i.e. **~1,000 MB**, which is ~20 s at the 50 MB/s model and
+~200 s on a worker running at the 10× slowdown the straggler demo deliberately configures. A
+flat 300 s would therefore reap *healthy* generate tasks under exactly the heterogeneity NFR-2
+tells us to tolerate, and each reap would re-write 1,000 MB — a deadline that manufactures the
+straggler problem it was supposed to bound. 1800 s keeps ~9× headroom over the slow case while
+still bounding the wedged one.
+
+Second, **the blob-store client cannot hang in the first place**: `connect_timeout=5s`,
+`read_timeout=30s`, bounded retries (3, jittered exponential) on the boto3 config, so a
+stalled socket raises rather than blocks and the task takes the ordinary requeue path (T4).
+Belt and braces on purpose — the timeouts stop the common case, the deadline bounds *every*
+case including ones we have not thought of.
 
 **Why "pause is fine" when the DB is down.** This is a batch analytics job, not a serving
 path: the SLO is job completion and correctness, not per-request availability. An RDS
@@ -328,11 +362,32 @@ that no consumer can validate. So the job fails with a cause, and `finalize`'s
 `assert count == F` (D2/D12, DM-010) is the last line of defence — it catches any lost *or*
 double-counted work end-to-end, independent of everything above.
 
+**The one exception: `finalize` gets 10 attempts and can never fail its job.** Everything in
+the paragraph above rests on "the work cannot be produced", which is true of a `map` over an
+unreadable file and false of `finalize`. By the time a `finalize` task exists, the
+`count == F` partial exists — the job's whole computation is *done*, and all that remains is
+one 8 MB read, a divide, and a PUT, every part of it idempotent. Killing the job there
+discards hours of completed work for a transient fault on the cheapest task in the system,
+and it is not recoverable after the fact: `failed` is terminal, and the claim query serves
+only `('running','finalizing')`, so a finalize task re-enqueued on a `failed` job is
+unclaimable forever. So `finalize` rows are seeded with `max_attempts = 10` (worst case ~20 s
+of retry), **and** the reaper's job-failure statement excludes any job that still holds an
+unconsumed `count == F` partial, emitting `job.needs_finalize` for it instead; DM-003's
+backstop can then reset such a job to `finalizing` and re-enqueue. The asymmetry is
+deliberate and one-directional: we will let a job sit visibly unfinished, never let it
+throw away a finished answer.
+
 **How the `generate → map` dependency is handled (D9).** Input generation is distributed:
 ≈2,000 `generate` tasks × ~50 files. Their `map` tasks are **not** created at submission
 time; a generate task's commit transaction creates the 10 `map` tasks for its 50-file batch —
 the same "work creates work inside the completing transaction" mechanism as D3's eager
-pairing. This buys an invariant worth stating plainly: **a task exists if and only if its
+pairing. **That transaction is also what computes each spawned `map` task's payload**, and it
+is the only thing that does: it chunks its own `fileIdxFrom..fileIdxTo` range by K, and for
+each chunk writes the chunk bounds, the `dedupe_key` above, and `inputUris` — derived from
+`jobs/{jobId}/inputs/{fileIdx}.csv` over the chunk, via the single shared key constant the
+API, this branch, and the worker's `BlobStore` all use (LLD §2, §7). Nothing else needs to
+know how an input file is named, and no `map` task ever receives a URI it did not get from
+that one layout. This buys an invariant worth stating plainly: **a task exists if and only if its
 inputs exist, so the queue only ever contains runnable tasks.** There is no blocked/waiting
 state, no DAG scheduler, no join barrier, and the claim query (D8, DM-007) never has to test
 readiness. It also means a redelivered reduce or map task can never find its inputs missing.

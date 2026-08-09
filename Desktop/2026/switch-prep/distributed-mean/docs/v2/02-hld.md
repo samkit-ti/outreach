@@ -73,8 +73,10 @@ flowchart LR
 ```
 
 **Separation of planes** is the load-bearing property: the control plane moves
-kilobytes (task rows, URIs); the data plane moves ~2 TB at the max job (800 GB input
-written + 800 GB read + ~400 GB intermediates, per 01 §4). Postgres never sees a
+kilobytes (task rows, URIs); the data plane moves ≈2.0 TB of **traffic** at the max job
+(800 GB input written + 800 GB read + ~400 GB intermediates) against ≈1.0 TB
+**resident** at peak (800 GB inputs + ~200 GB partials), per 01 §4 — traffic is the
+request/transfer bill, residency is the storage-days bill. Postgres never sees a
 vector; S3 never sees a state machine.
 
 | Component | Responsibilities | Deliberately NOT responsible for |
@@ -99,10 +101,12 @@ Four task types, one queue, uniform claiming (full schemas in LLD):
 
 ### Eager 5-ary reduction (the centerpiece)
 
-There is **no pre-built tree**. When any worker commits a partial, in the *same
+There is **no pre-built tree**. When any worker commits a task, in the *same
 transaction* — serialised per job by an advisory lock, so concurrent committers can
 never both undercount the partial set and both decline (LLD §4) — it
-runs the pairing step:
+runs the pairing step. The reaper runs the same step, under the same lock, for every job
+whose task it requeues, because a reaped task never commits and would otherwise leave the
+job with no future trigger. Those two are the complete trigger set:
 
 ```
 ≥ 5 unconsumed partials for job?         → claim 5, insert reduce task
@@ -228,10 +232,11 @@ flowchart LR
 | Worker crash mid-task | lease expiry (reaper) | task → pending, re-claimed | none (idempotent keys) |
 | Worker crash after PUT, before commit | lease expiry | retry overwrites same key | none |
 | Duplicate execution (redelivery) | — | consumed-guard blocks double-consume of partials; PUTs idempotent | none |
-| Poison task (bug, corrupt file) | attempts ≥ 3 | task → dead, job → failed with cause | job fails loudly, others unaffected |
+| Executor raises (bad file, blob error past its retries) | the exception itself | worker requeues its own task, fenced by its lease token (LLD §4 T4); requeue *is* the retry | none |
+| Poison task (bug, corrupt file) | attempts ≥ 3 | task → dead, job → failed with cause — except a `finalize` on a job still holding its count=F partial, which raises `job.needs_finalize` instead of discarding a finished computation | job fails loudly, others unaffected |
 | Reaper/supervisor down | health check | leases expire later; W drifts — degraded, not broken | none |
 | Postgres down | connection errors | system pauses; workers back off; no partial state lost (A-6) | none |
-| Object store down | GET/PUT errors | task-level retry w/ backoff | none |
+| Object store down | GET/PUT errors past the client's bounded retries | task-level requeue (T4), then dead → job failed with cause | none |
 | API down | ALB health | stateless → restart; jobs in flight unaffected (workers don't need API) | none |
 
 ## 8. What breaks first at 10× (evolution ladder)
@@ -241,7 +246,8 @@ flowchart LR
    move queue to SQS + outbox (DM-004 failure condition). State stays in Postgres.
 3. **C → 100M** (0.8 GB per vector): partials stop fitting the K×8 MB budget → chunk
    the C dimension *within* a task (stream in column blocks); topology unchanged.
-4. **Workers → thousands**: Postgres connection pressure → PgBouncer, then the SQS move.
+4. **Workers → beyond W_max=32**: at 2 connections per worker (LLD §5) the pool is `2W + 10`,
+   so Postgres connection pressure arrives first → PgBouncer, then the SQS move.
 5. **Multi-tenant / quotas**: fairness ordering generalizes to weighted fair queuing
    (DM-007 evolution).
 

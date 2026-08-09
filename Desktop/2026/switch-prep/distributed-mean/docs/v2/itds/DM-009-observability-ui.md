@@ -78,8 +78,8 @@ browser's built-in `EventSource` consumes them and auto-reconnects.
 - SSE is a plain HTTP/1.1 response in Express — no protocol upgrade, no extra library, no separate
   port: set the headers, `flushHeaders()`, then `res.write()` frames for the life of the request.
 - Reconnect and gap-recovery are *in the standard*: `EventSource` retries automatically and replays
-  the last `id:` it saw as a `Last-Event-ID` request header. Because our event ids are a monotone
-  `BIGSERIAL`, resume is literally `WHERE id > $cursor` — the client cannot silently miss events.
+  the last `id:` it saw as a `Last-Event-ID` request header, so resume is a `WHERE id > $cursor`
+  query — provided the read lags commit visibility (see "Why the tail reads one second behind").
 - One-directional, matching the actual flow: everything client→server is already a REST call
   (submit job, set W). Nothing is being given up.
 - The event log is independently valuable: an append-only, ordered, replayable audit of *why* the
@@ -177,6 +177,7 @@ app.get('/events', async (req, res) => {
   res.flushHeaders();
   const cursor = Number(req.headers['last-event-id'] ?? 0);   // free gap recovery
   for (const e of await backfill(cursor)) send(res, e);        // WHERE id > cursor
+                                                              //   AND ts < now() - '1 second'
   const unsub = hub.subscribe(res);
   const ka = setInterval(() => res.write(':ka\n\n'), 15_000);  // < ALB 60s idle
   req.on('close', () => { clearInterval(ka); unsub(); });
@@ -188,7 +189,21 @@ That is the entire transport: no upgrade handshake, no library, no second port. 
 that matter and are easy to miss — `compression` must be skipped for this route (it buffers frames
 until a flush threshold), and the 15 s keepalive comment must stay below the ALB idle timeout or the
 LB will cut an idle stream. Reconnect needs no code at all: `EventSource` backs off and resends
-`Last-Event-ID`, and because ids are a monotone `BIGSERIAL` the resume query is `WHERE id > $cursor`.
+`Last-Event-ID`, and the resume query is `WHERE id > $cursor` — under the visibility lag below.
+
+**Why the tail reads one second behind, and why that lag *is* the resume guarantee.**
+`BIGSERIAL` ids are assigned monotonically at INSERT time, but they become *visible* in commit
+order, and the two are not the same order: a transaction that grabs id 500 and then spends 40 ms
+finishing commits after a transaction that grabbed 501 and committed immediately. A tailer that
+polls `WHERE id > $cursor` at full speed will therefore read 501, advance its cursor past it, and
+**never see 500** — a permanently skipped event, not a delayed one. So the ticker's read is
+`WHERE id > $cursor AND ts < now() - interval '1 second'`: the lag is longer than any commit this
+system runs, so by the time a row is eligible to be streamed every lower id that will ever commit
+already has. One second of freshness is the price of the guarantee, and the p95 freshness target
+below is stated against it. Two consequences worth stating rather than discovering: the id
+sequence has **permanent gaps** wherever a transaction rolled back after taking an id, so
+contiguity is not a property to assert; and "the client cannot silently miss events" is only true
+*with* the lag — without it, the claim is false.
 
 **Why volume is not a problem.** ≈50k transitions per max job would be ~50k frames if pushed
 one-per-event, which no browser panel can render usefully. So the stream is split by cardinality:
@@ -240,7 +255,9 @@ notice a bar going backwards far more than they notice one that is fractionally 
 
 ```sql
 CREATE TABLE events (
-  id       BIGSERIAL PRIMARY KEY,   -- monotone; doubles as the SSE id / Last-Event-ID cursor
+  id       BIGSERIAL PRIMARY KEY,   -- the SSE id / Last-Event-ID cursor. Assigned monotonically,
+                                    -- but VISIBLE in commit order — hence the 1 s read lag above
+                                    -- (and permanent gaps where a txn rolled back)
   ts       TIMESTAMPTZ NOT NULL DEFAULT now(),
   type     TEXT        NOT NULL,    -- see taxonomy below
   job_id   UUID NULL, task_id UUID NULL, worker_id TEXT NULL,  -- workers.id is hostname:pid
@@ -248,6 +265,7 @@ CREATE TABLE events (
 );
 CREATE INDEX ON events (id) INCLUDE (type);
 CREATE INDEX ON events (job_id, id);
+CREATE INDEX ON events (ts) WHERE type = 'task.done';   -- the throughput gauge below
 ```
 
 Append-only: no `UPDATE`, no `DELETE` except a retention trim (keep 7 days / 2M rows). Types:
@@ -283,8 +301,10 @@ always add up, and a job visibly moves `queued → running` the moment a worker 
 the multi-job fairness story (DM-007) rendered as a state change rather than as a number.
 
 `throughput_tasks_per_sec` is `count(*) FROM events WHERE type='task.done' AND ts > now()-'10s'` / 10 —
-which is the one place the event log is read as a metric rather than as an audit trail, and it is
-cheap on the `(id)` index. `eta_sec` is remaining coverage ÷ trailing throughput, labelled an estimate.
+which is the one place the event log is read as a metric rather than as an audit trail. It needs
+its own index: the predicate is on `ts` and `type`, which the `(id)` index cannot serve at all, so
+a partial index `ON events (ts) WHERE type='task.done'` makes it a bounded range scan over ~10 s
+of rows instead of a growing sequential scan (LLD §1). `eta_sec` is remaining coverage ÷ trailing throughput, labelled an estimate.
 
 **Two queue-age gauges, and which signals are worth waking someone for.**
 `queue.oldest_pending_age_sec` (`max(now() − created_at)` over `pending` tasks) and
@@ -345,10 +365,10 @@ genuine client→server push requirement and the point at which WebSockets earns
 
 | Checkpoint | Target | How measured |
 |-----------|--------|--------------|
-| End-to-end freshness | `task.done` commit → visible on screen < 1 s (p95) | timestamp diff, event `ts` vs browser render |
+| End-to-end freshness | `task.done` commit → visible on screen < 2 s (p95) — 1 s of deliberate visibility lag plus the 1 Hz ticker | timestamp diff, event `ts` vs browser render |
 | Progress monotonicity | 0 decreases across a full F=1000 run | record every `progress` value from the stream; assert non-decreasing |
 | Progress exactness | reaches exactly 1.0 iff `finalize` committed and the result file exists | compare final frame with `GET /jobs/:id` and the S3 object |
-| Reconnect gap recovery | kill the API mid-job; on reconnect, 0 events missed | compare client-received ids with `SELECT max(id)` — contiguous |
+| Reconnect gap recovery | kill the API mid-job; on reconnect, 0 events missed | compare the set of client-received ids against `SELECT id FROM events` over the window — every *committed* id present. Not contiguity: rolled-back inserts leave permanent gaps in the sequence by design |
 | Fan-out cost | 10 open tabs ⇒ ≤1 stats query/sec total | `pg_stat_statements` call count for the snapshot query |
 | Multi-job visibility | F=3 job submitted during an F=1000 job: both progress bars advance within 5 s | screen recording + per-job frames |
 | Bonus coverage | workers free/busy, jobs completed, jobs queued all present and updating | visual check against the brief's bonus wording |

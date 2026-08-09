@@ -240,9 +240,13 @@ proportional to *in-flight* work rather than to lifetime work — the queue inde
 workers do not synchronise into a thundering herd), which costs at most 500 ms of claim latency against
 tasks that take ~2.2 s; if that ever matters, `LISTEN/NOTIFY` on task insert is the drop-in fix — the
 NOTIFY replaces the timer, not the claim query, so it is additive and needs no schema change.
-*Connections:* one Postgres connection per worker (required — the commit and the eager-pairing enqueue
-are one transaction), pooled at the API side where request concurrency is high and transactions are
-short; past roughly W > 100 workers, PgBouncer in transaction mode goes in front. None of these is
+*Connections:* **two Postgres connections per worker.** One carries claim → execute → commit and
+cannot be shared, because the commit and the eager-pairing enqueue are a single multi-statement
+transaction; the second is dedicated to the heartbeat thread, because libpq connections are not
+thread-safe for concurrent use and a heartbeat interleaved into an open T2 would either be rolled
+back with it or corrupt the protocol stream. So the pool is `2W` plus the API's own pool (10),
+where request concurrency is high and transactions are short — 74 connections at W_max = 32
+(DM-008). Past roughly W > 100, PgBouncer in transaction mode goes in front. None of these is
 novel; all three are configuration, which is exactly the claim being made.
 
 **Why each alternative was rejected, specifically.**
@@ -282,7 +286,8 @@ re-expression is the real cost of the move.
 | Checkpoint | Target | How measured |
 |-----------|--------|--------------|
 | Atomic eager pairing | 0 stranded partials and 0 double-consumed partials across 1,000 induced crashes at the D3 commit point | Chaos test: `kill -9` a worker inside the claim-and-enqueue transaction; assert `sum(partial.count) == F` for every completed job and no `consumed` partial without a live owning `reduce` task |
-| Claim latency | p99 < 50 ms with 200 concurrent workers polling | `EXPLAIN (ANALYZE)` on the claim query + application histogram of claim round-trip |
+| Claim latency | p99 < 50 ms at W_max=32 concurrent workers polling, and still < 50 ms at a synthetic 200 | `EXPLAIN (ANALYZE)` on the claim query + application histogram of claim round-trip |
+| Claim starvation | 0 claimers return zero rows while ≥1 eligible task is pending | the CTE's `LIMIT 16` window makes an empty return require >16 simultaneous contended heads; assert over a W=32 burst against a 100-task queue |
 | Sustained claim rate | ≥ 500 claims/sec on a single Postgres 16 with no-op tasks (≥10× the projected real rate) | Load harness enqueues 500k no-op tasks; measure completions/sec and `pg_stat_activity` lock waits |
 | Zero lost tasks under worker loss | 100% of tasks from `kill -9`ed workers requeued within lease + reaper interval (≤ 2× lease) | Kill 50% of workers mid-job; assert job still completes with a correct result vector |
 | Fairness (D8) | A 3-task job submitted behind a 27k-task job completes in < 60 s — it does not wait for the large job | Submit F=10 job after F=100k job; compare wall-clock to the small job run alone |

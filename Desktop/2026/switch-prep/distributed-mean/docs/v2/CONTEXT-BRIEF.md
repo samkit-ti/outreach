@@ -16,7 +16,7 @@
 | **Task** | One unit of queued work. Types: `generate`, `map`, `reduce`, `finalize`. Many tasks per job. |
 | **Partial** | An intermediate result: a vector of C partial *sums* plus a *count* n of input files it covers. Stored as an object; row in `partials` table. |
 | **K** | Max fan-in = 5 (the "≤5 files at a time" RAM constraint). Applies to input files AND partials, since a partial is file-shaped (C float64s). |
-| **W** | System-level worker count. Configurable via API (bonus). |
+| **W** | System-level worker count. Configurable via API (bonus). Range 0–**W_max = 32** (DM-008). |
 | **F, C** | Files per job (1 < F < 100k), values per file (1 < C < 1,000k). |
 
 ## Back-of-envelope (max job: F=100k, C=1M)
@@ -46,7 +46,7 @@ any order by any worker. Mean-of-means is incorrect for unequal group sizes (F n
 multiple of 5). Divide by F exactly once, in `finalize`. → ITD DM-001, DM-010
 
 **D3 — Adaptive fan-in ("eager pairing").** On partial commit, inside the same DB
-transaction — **serialised per job by `pg_advisory_xact_lock(hashtext(job_id::text))`, with
+transaction — **serialised per job by `pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`, with
 plain `FOR UPDATE ORDER BY created_at` on partials and no `SKIP LOCKED` there (v2 hardening:
 `SKIP LOCKED` let two concurrent committers each undercount the partial set and each decline to
 pair, stranding partials permanently)** — if ≥5 unconsumed partials for the job → atomically
@@ -77,11 +77,17 @@ lives in the `partials` row and object metadata) — 2.5× smaller than CSV, zer
 cost. Result: CSV, mirroring input format. → ITD DM-005
 
 **D7 — State machine + at-least-once + idempotency.** Task states:
-`pending → claimed → done | failed(retryable) | dead`. Lease expiry (heartbeat-extended)
-requeues tasks from crashed workers; a reaper process enforces it. All task outputs are
-idempotent: deterministic object keys derived from task id, atomic PUT — a retried task
-harmlessly overwrites. Consuming partials (D3) is guarded so a redelivered reduce task
-cannot double-consume. Max attempts (3) → task `dead` → job `failed` with cause. → ITD DM-006
+`pending → claimed → done | dead` — there is **no transient `failed` state**: a retryable
+failure is a fenced requeue to `pending` (T4), so requeue *is* the retry and no backoff timer
+exists (the claim query's fairness ordering supplies the spacing). Lease expiry
+(heartbeat-extended, bounded by an absolute `deadline_at`) requeues tasks from crashed
+workers; a reaper process enforces it, and also re-runs the pairing step for every job whose
+task it touches. All task outputs are idempotent: deterministic object keys derived from task
+id, atomic PUT — a retried task harmlessly overwrites. Consuming partials (D3) is guarded so a
+redelivered reduce task cannot double-consume. Max attempts (3) → task `dead` → job `failed`
+with cause; **`finalize` is the exception at 10 attempts, and a job holding an unconsumed
+`count == F` partial is never failed** (event `job.needs_finalize` instead) — failing it would
+discard a completed computation irreversibly. → ITD DM-006
 
 **D8 — Multi-job fairness: round-robin via claim ordering.** The SKIP LOCKED claim
 query orders candidate tasks by (in-flight tasks of that job ASC, task priority, age).
@@ -126,7 +132,7 @@ unnecessary at these bounds (documented). → ITD DM-010
 ## Consistency rules for ITD authors
 
 1. Follow the template in `itds/TEMPLATE.md` exactly. Status: **DECIDED**. Date: 2026-08-10. Author: Samkit Shah.
-1b. **Column and endpoint names are quoted from `03-lld.md` §1/§6 — never re-invented; the LLD DDL is the single source of truth.** Canonically: `partials.produced_by` / `partials.consumed_by` (never `task_id`, `consumed_by_task_id`, `consumed_at`); `tasks.status` (never `state`); job states `pending / running / finalizing / completed / failed`; endpoints `PATCH /system/workers` and `GET /events` (SSE); event `job.submitted` (never `job.created`); priority `finalize=0 < reduce=1 < map=2 < generate=3` so the claim query sorts `priority ASC`. Constants: lease 30 s, heartbeat 10 s, reaper 5 s, worst-case detection 35 s.
+1b. **Column and endpoint names are quoted from `03-lld.md` §1/§6 — never re-invented; the LLD DDL is the single source of truth.** Canonically: `partials.produced_by` / `partials.consumed_by` (never `task_id`, `consumed_by_task_id`, `consumed_at`); `tasks.status` (never `state`); job states `pending / running / finalizing / completed / failed`; endpoints `PATCH /system/workers` and `GET /events` (SSE); event `job.submitted` (never `job.created`); priority `finalize=0 < reduce=1 < map=2 < generate=3` so the claim query sorts `priority ASC`. Constants: lease 30 s, heartbeat 10 s, reaper 5 s, worst-case detection 35 s; **absolute task deadlines are per type — `{map:300, reduce:300, finalize:300, generate:1800}` seconds** (a generate batch moves ~1,000 MB); **W_max = 32**; **2 Postgres connections per worker** (execute/commit + a dedicated heartbeat connection), so the pool is `2W + API pool (10)`; `max_attempts` 3, except `finalize` at 10.
 2. Use the vocabulary above verbatim (job/task/partial/K/W/F/C).
 3. Quote the envelope numbers from this brief — do not re-derive different ones.
 4. Alternatives must be real (a reasonable person could choose them) with honest cons; the chosen section must make a positive case AND state a failure condition (what would make us revisit).

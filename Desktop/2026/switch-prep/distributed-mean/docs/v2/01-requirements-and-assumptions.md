@@ -41,7 +41,7 @@
 | A-4 | Single region, single tenant, no authn/authz in the current scope. | Current-scope simplification; noted in HLD §9. |
 | A-5 | At-least-once task execution is acceptable if effects are idempotent. | Standard queue semantics; exactly-once is a myth across queue+storage boundaries. |
 | A-6 | The DB (Postgres) is the availability floor: if it is down, the system pauses but does not corrupt. | Single-writer control plane is the simplest correct design at this scale; HA via RDS Multi-AZ on AWS. |
-| A-7 | Worker count W is small-to-moderate (1–~200). | Bounded by Postgres connection budget (pooled) and the demo scope; documented switch triggers if it grows. |
+| A-7 | Worker count W is small-to-moderate: **1–32 (W_max, DM-008)**. | Bounded by the Postgres connection budget — 2 connections per worker (execute + heartbeat, LLD §5/§8) → 74 at W_max — and by the demo scope; documented switch triggers (PgBouncer, then SQS) if it grows. |
 | A-8 | **K=5 is a logical fan-in limit on how many files' worth of data a task may have in flight; we honour the stricter byte reading too by streaming.** `generate` is exempt from K because it writes files sequentially and aggregates nothing; under the stricter reading of K as covering writes, `GEN_BATCH` drops from 50 to 5 and the generate-task count rises 10×, changing nothing structurally (this knob exists). | Canonical reading, quoted verbatim by DM-008. `map`/`reduce` stream inputs one at a time into a single length-C accumulator, so peak resident is ~1 vector (8 MB) not 5 (≈40 MB) — we satisfy both readings at once. |
 | A-9 | Intermediate storage is plentiful (object store); we trade disk for parallelism. Intermediates are GC'd after job completion. | Object storage is cheap; ~F/4 partial objects worst case. |
 
@@ -59,23 +59,26 @@ below are ≈1‰ overestimates.**
 | Map (leaf) tasks | ⌈100k/5⌉ = **20,000** | Task bookkeeping must be cheap → single indexed `tasks` table. |
 | Reduce tasks | 20k→4k→800→160→32→7→2→1 ≈ **5,000**, 7 levels | Reduction is a real second phase, ~20% extra work; fan-in 5 keeps tree shallow (log₅). |
 | Generate tasks | ~2,000 (50 files each) | Generation parallelized like everything else. |
-| Total tasks / max job | ≈ **27,000** | At even 200 workers and ~2.2 s/task → claim rate ≈90/s « 1k/s → Postgres queue comfortably in range. |
-| Total data-plane bytes | ≈ **2.0 TB** per max job: 800 GB input written by `generate` + 800 GB read by `map`, plus ≈400 GB of intermediates (≈200 GB partial writes — 25k × 8 MB, of which 160 GB is level 0 — and ≈200 GB read back one level up) | Data plane (S3/MinIO) does the heavy lifting; control plane stays tiny. The **intermediate writes (~200 GB)** are the only halvable component — see the cost row. |
+| Total tasks / max job | ≈ **27,000** | Even at W_max=32 and ~2.2 s/task → claim rate ≈14/s « 1k/s → Postgres queue comfortably in range (and it stays in range an order of magnitude above W_max). |
+| Total data-plane **traffic** | ≈ **2.0 TB** per max job: 800 GB input written by `generate` + 800 GB read by `map`, plus ≈400 GB of intermediates (≈200 GB partial writes — 25k × 8 MB, of which 160 GB is level 0 — and ≈200 GB read back one level up) | Data plane (S3/MinIO) does the heavy lifting; control plane stays tiny. The **intermediate writes (~200 GB)** are the only halvable component — see the cost row. |
+| Peak **resident** bytes | ≈ **1.0 TB** per max job: 800 GB of inputs + ≈200 GB of partial objects | Traffic and residency are different bills: traffic drives request/transfer cost, residency drives storage-days. Both fall to ~0 after the completion GC. |
 | Task payload size | < 1 KB (URIs + params) | Control plane rows are negligible next to data plane. |
-| **Task service time** | **≈2.2 s** — the constant every wall-clock figure in this doc set uses | A `map` task moves 5 × ~20 MB CSV in + 8 MB f64 out ≈ 108 MB; at ~50 MB/s effective per-connection object-store throughput that is ≈2.2 s, and it is **I/O-bound, not CPU-bound** (the numpy add over 5M float64 is milliseconds). So one worker sustains **~0.45 tasks/s**, and claim rate is `W × 0.45` — which is what puts a 200-worker fleet at ~90 claims/s, three orders of magnitude inside the Postgres-queue band (DM-004). |
-| Marginal cost, max job (AWS) | ≈ **$1–2** Fargate compute (~16.5 worker-hours at ~$0.05/vCPU-hr-class pricing) + ≈ **$4** S3 requests (~50k PUT/GET ops at $0.005/1k PUT, $0.0004/1k GET) + storage-days on ~1.2 TB | Compute is not the bill; **requests and intermediate bytes are**. The ~200 GB of intermediate writes is the halvable part — in-worker pre-combining (batch several map results before PUT) roughly halves both the byte count and the op count, and is exactly DM-001's failure condition 1. |
+| **Task service time** | **≈2.2 s** — the constant every wall-clock figure in this doc set uses | A `map` task moves 5 × ~20 MB CSV in + 8 MB f64 out ≈ 108 MB; at ~50 MB/s effective per-connection object-store throughput that is ≈2.2 s, and it is **I/O-bound, not CPU-bound** (the numpy add over 5M float64 is milliseconds). So one worker sustains **~0.45 tasks/s**, and claim rate is `W × 0.45` — ≈14/s at W_max=32, and still only ~90/s at a hypothetical 200 workers, three orders of magnitude inside the Postgres-queue band (DM-004). |
+| Marginal cost, max job (AWS) | ≈ **$1–2** Fargate compute (~16.5 worker-hours at ~$0.05/vCPU-hr-class pricing) + ≈ **$4** S3 requests (~50k PUT/GET ops at $0.005/1k PUT, $0.0004/1k GET) + storage-days on the ~1.0 TB **resident** (not the 2.0 TB of traffic) | Compute is not the bill; **requests and intermediate bytes are**. The ~200 GB of intermediate writes is the halvable part — in-worker pre-combining (batch several map results before PUT) roughly halves both the byte count and the op count, and is exactly DM-001's failure condition 1. |
 
 **Wall-clock model (uses the 2.2 s constant above, no other input).**
 
-- **Demo job, F=1000 / C=100k:** 20 `generate` + 200 `map` + ~50 `reduce` + 1 `finalize` ≈ **271 tasks**
-  ≈ 600 worker-seconds ≈ **2.5 min at W=4**. (At C=100k the per-task bytes are 10× smaller, so 2.2 s is
-  a conservative ceiling here — which is the right direction for a demo claim.)
+- **Demo job, F=1000 / C=100k:** 20 `generate` + 200 `map` + 63 `reduce` + 1 `finalize` = **284 tasks**
+  ≈ 630 worker-seconds ≈ **2.6 min at W=4**. (The reduce chain over 200 leaf partials runs
+  50 + 10 + 2 + 1 = **63** reduces across its levels, fan-in 5 in steady state with drain-mode
+  fan-in in each level's tail. At C=100k the per-task bytes are 10× smaller, so 2.2 s is a
+  conservative ceiling here — which is the right direction for a demo claim.)
 - **Max job, F=100k / C=1M:** ≈27,000 tasks × 2.2 s ≈ **16.5 worker-hours** — so ≈**3.3 h at W=5**,
-  ≈**10 min at W=100**. Linear in W, because the work is embarrassingly wide.
+  ≈**31 min at W_max=32**. Linear in W, because the work is embarrassingly wide.
 - **The floor W cannot remove:** the reduce tree is ~7 levels plus the leaf level, and a level-k partial
   cannot exist before its children, so **~8 serialised task latencies ≈ 18 s** remain no matter how many
-  workers are added. At W=100 the max job is ~10 min, so the floor is invisible; on the F=8 demo job it
-  *is* the runtime. This is the number that makes "add workers" stop working, and it is why DM-001 cares
+  workers are added. Even at W_max=32 the max job is ~31 min, so the floor is invisible; on the F=8 demo
+  job it *is* the runtime. This is the number that makes "add workers" stop working, and it is why DM-001 cares
   about tree depth rather than only about width.
 
 Small-job sanity check (F=10, C=1000): 1 generate task, 2 map tasks, 1 reduce, 1 finalize — the same machinery degenerates gracefully; no special-casing.

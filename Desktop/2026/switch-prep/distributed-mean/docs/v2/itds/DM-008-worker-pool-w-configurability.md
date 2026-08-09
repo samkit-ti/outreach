@@ -155,8 +155,10 @@ thread inside the process extends the lease every 10 s while the main thread doe
 **Cons:**
 - ~150 MB RSS per worker of which ~100 MB is interpreter + numpy baseline, duplicated W times. At
   W=8 that is ~1.2 GB for ~400 MB of useful buffers.
-- One DB connection per worker; W=32 plus API replicas starts to matter for RDS `max_connections`
-  and would want pgbouncer.
+- **Two** DB connections per worker — one for claim/execute/commit (T2 is a multi-statement
+  transaction) and one dedicated to the heartbeat thread (libpq is not thread-safe per
+  connection). So the fleet needs `2W`, and at W_max=32 that is 64 plus the API's pool of 10 =
+  74, which starts to matter for RDS `max_connections` and would want pgbouncer beyond it.
 - No overlap between the S3 GET of the next input and the summation of the current one, unless
   added inside the task (see below).
 
@@ -276,8 +278,8 @@ i.e. we start owning a latency or cost SLO instead of demonstrating behaviour �
 scale-down costs a requeue — then tasks must be split finer or made checkpointable; (c) C rises far
 enough that 5 inputs plus one accumulator no longer fit a container (≈C > 30M at a 2 GB limit), which
 breaks K=5 as a task-level constraint and forces chunked/streaming `map` tasks; (d) W_max needs to
-exceed ~32, where per-worker DB connections start pressing RDS `max_connections` and pgbouncer plus
-`ecs:UpdateService` throttling become real.
+exceed ~32, where the `2W` per-worker DB connections (64 at W_max, 74 with the API pool) start
+pressing RDS `max_connections` and pgbouncer plus `ecs:UpdateService` throttling become real.
 
 ---
 

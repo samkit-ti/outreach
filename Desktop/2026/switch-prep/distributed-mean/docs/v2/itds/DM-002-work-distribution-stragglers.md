@@ -116,8 +116,9 @@ task becomes eligible only once all of its K designated children are `done`.
 
 Nothing is ever assigned. A free worker atomically claims the highest-ranked eligible
 task (D8 ordering, `FOR UPDATE SKIP LOCKED`, D5). Reduce work is created *reactively*:
-on every partial commit, inside the same transaction, the committer takes a per-job
-advisory lock — `pg_advisory_xact_lock(hashtext(job_id::text))` — and then reads the
+on every successful task commit (and, for reaped tasks that never commit, in the reaper —
+see the trigger set below), inside the same transaction, the committer takes a per-job
+advisory lock — `pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))` — and then reads the
 job's unconsumed partials with a plain `SELECT … FOR UPDATE ORDER BY created_at` (no
 `SKIP LOCKED` on partials). If ≥5 unconsumed partials exist for the job, claim 5 and
 enqueue a `reduce`; if the job has no other tasks pending or claimed and ≥2 partials
@@ -198,7 +199,7 @@ eagerly at fan-in 5 in steady state and greedily at fan-in 2–4 in drain mode. 
 speculation is documented as an evolution and is **not** in the current scope.
 
 **How pairing is serialised.** The eager-pairing step at the top of T2 takes a per-job
-advisory lock, `pg_advisory_xact_lock(hashtext(job_id::text))`, and then reads the job's
+advisory lock, `pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`, and then reads the job's
 unconsumed partials with a plain `SELECT … FOR UPDATE ORDER BY created_at` — deliberately
 **not** `SKIP LOCKED`. Skipping locked partial rows is what makes two concurrent T2s for
 the same job each undercount the partial set (each also still sees the other's task as
@@ -208,7 +209,23 @@ workers. With the lock, pairing is serialised per job, so concurrent committers 
 milliseconds instead of racing: the second pairer runs against the first's committed
 partial and sees the first's task as `done`, so it has a complete view and exactly one
 pairing decision is made per commit. Contention is per-job and negligible — the locked
-section is milliseconds, and two different jobs never contend at all.
+section is milliseconds, and two different jobs never contend at all. The two-key form
+namespaces the lock under `hashtext('pairing')` so it cannot collide with any other
+advisory-lock use in the system; within that namespace the job key is an `int4` hash, so
+the worst a hash collision can do is make two *unrelated* jobs serialise their pairing
+steps for a few milliseconds — a throughput coincidence, never a safety issue, because the
+lock's job is to serialise, and serialising more than strictly necessary is harmless.
+
+**What triggers pairing, exhaustively.** Pairing runs (1) in T2 after **every** successful
+fenced task-update, and (2) in T3 for **every** job whose task the reaper requeues or kills.
+The first is deliberately unconditional: it is tempting to skip pairing when the partial
+`INSERT … ON CONFLICT DO NOTHING` matched nothing ("a prior commit already paired"), but a
+task reaped *after* inserting its partial and *before* its commit landed will be retried, and
+its retry's commit sees exactly that conflict — skip pairing there and the job holds
+unconsumed partials with no trigger left. The second exists because a reaped task never
+commits at all, so T2's trigger cannot fire for it. Pairing is idempotent under the job lock
+(it reads current state and either takes rows or does not), so an unnecessary evaluation
+costs one indexed read while a skipped one costs the job. → LLD §4 T2/T3
 
 **Why pull self-balances.** A pull queue is work-conserving by construction: a worker
 holds a task only while executing it, so there is no private backlog to be stranded

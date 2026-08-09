@@ -11,7 +11,9 @@
 CREATE TYPE job_status  AS ENUM ('pending','running','finalizing','completed','failed');
 -- 'finalizing' guards double-finalize: the completion branch of T2 transitions
 -- running → finalizing atomically with enqueuing the finalize task (DM-003).
-CREATE TYPE task_status AS ENUM ('pending','claimed','done','failed','dead');
+CREATE TYPE task_status AS ENUM ('pending','claimed','done','dead');
+-- There is no transient 'failed' task state: a retryable failure IS a requeue to
+-- 'pending' (T4), so failure and redelivery share one code path (DM-006).
 CREATE TYPE task_type   AS ENUM ('generate','map','reduce','finalize');
 
 CREATE TABLE jobs (
@@ -19,11 +21,14 @@ CREATE TABLE jobs (
   f             INT  NOT NULL CHECK (f BETWEEN 2 AND 99999),
   c             INT  NOT NULL CHECK (c BETWEEN 2 AND 999999),
   status        job_status NOT NULL DEFAULT 'pending',
+  idempotency_key TEXT,                        -- from the POST /jobs header; NULL allowed
   result_uri    TEXT,
   error         TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at  TIMESTAMPTZ
 );
+CREATE UNIQUE INDEX idx_jobs_idem ON jobs (idempotency_key)
+  WHERE idempotency_key IS NOT NULL;           -- partial: absent header ⇒ distinct job
 
 CREATE TABLE tasks (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -31,23 +36,33 @@ CREATE TABLE tasks (
   type          task_type   NOT NULL,
   status        task_status NOT NULL DEFAULT 'pending',
   priority      SMALLINT    NOT NULL,          -- finalize=0 < reduce=1 < map=2 < generate=3
+  CHECK (priority = CASE type WHEN 'finalize' THEN 0 WHEN 'reduce' THEN 1
+                              WHEN 'map'      THEN 2 WHEN 'generate' THEN 3 END),
+                                               -- makes the ASC/DESC footgun unrepresentable:
+                                               -- priority is a function of type, not a free field
   payload       JSONB       NOT NULL,          -- see §2 (URIs + params only, < 1 KB)
   attempts      SMALLINT    NOT NULL DEFAULT 0,
-  max_attempts  SMALLINT    NOT NULL DEFAULT 3,
+  max_attempts  SMALLINT    NOT NULL DEFAULT 3,  -- finalize rows are seeded with 10 (§4 T3)
   worker_id     TEXT,
   lease_token   UUID,                          -- per-claim fencing token (DM-006)
+  claimed_at    TIMESTAMPTZ,                   -- set by the claim query from the DB's now()
+  deadline_at   TIMESTAMPTZ,                   -- claimed_at + the per-type deadline (§8);
+                                               -- absolute, never extended by a heartbeat
   lease_expires_at TIMESTAMPTZ,
+  last_error    TEXT,                          -- last executor exception, recorded by T4
   dedupe_key    TEXT,                          -- natural key for generate-spawned map tasks
-                                               -- ('map:{jobId}:{batchIdx}') ONLY. reduce has
-                                               -- no natural key: its dedupe comes from the
-                                               -- consumed-guard; finalize's from the
-                                               -- running→finalizing CAS (DM-006)
+                                               -- ('map:{jobId}:{fileIdxFrom}', a pure function
+                                               -- of the generate range chunked by K_FANIN)
+                                               -- ONLY. reduce has no natural key: its dedupe
+                                               -- comes from the consumed-guard; finalize's
+                                               -- from the running→finalizing CAS (DM-006)
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at   TIMESTAMPTZ
 );
 -- The queue index: everything the claim query touches, nothing else.
 CREATE INDEX idx_tasks_claim ON tasks (status, priority, created_at) WHERE status = 'pending';
 CREATE INDEX idx_tasks_lease ON tasks (lease_expires_at) WHERE status = 'claimed';
+CREATE INDEX idx_tasks_inflight ON tasks (job_id) WHERE status = 'claimed';  -- the inflight CTE
 CREATE INDEX idx_tasks_job   ON tasks (job_id, status);
 CREATE UNIQUE INDEX idx_tasks_dedupe ON tasks (dedupe_key) WHERE dedupe_key IS NOT NULL;
 
@@ -78,7 +93,15 @@ CREATE TABLE system_config (
 );
 
 CREATE TABLE events (                          -- append-only, feeds SSE (DM-009)
-  id BIGSERIAL PRIMARY KEY,                    -- monotone; doubles as SSE Last-Event-ID cursor
+  id BIGSERIAL PRIMARY KEY,                    -- SSE Last-Event-ID cursor. Ids are ASSIGNED
+                                               -- monotonically but COMMIT order is not id
+                                               -- order: a slow txn's lower id becomes visible
+                                               -- after a fast txn's higher id. So the SSE
+                                               -- ticker reads with a visibility lag —
+                                               -- `WHERE id > $cursor AND ts < now() - interval
+                                               -- '1 second'` — and that lag IS the resume
+                                               -- guarantee (DM-009). Rolled-back inserts leave
+                                               -- permanent id gaps; gaps are normal.
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   type TEXT NOT NULL,                          -- taxonomy in DM-009 (job.* streamed; task.* folded into 1 Hz snapshot)
   job_id UUID, task_id UUID, worker_id TEXT,
@@ -86,6 +109,8 @@ CREATE TABLE events (                          -- append-only, feeds SSE (DM-009
 );
 CREATE INDEX ON events (id) INCLUDE (type);
 CREATE INDEX ON events (job_id, id);
+CREATE INDEX ON events (ts) WHERE type = 'task.done';   -- the 10 s throughput gauge (DM-009):
+                                               -- the (id) index cannot serve a ts predicate
 -- Retention: trim to 7 days / 2M rows; no UPDATE/DELETE otherwise.
 ```
 
@@ -100,10 +125,22 @@ Invariants (enforced by transactions in §4):
 ```ts
 type TaskPayload =
   | { kind: 'generate'; jobId: string; fileIdxFrom: number; fileIdxTo: number; c: number; seedBase: string }
-  | { kind: 'map';      jobId: string; inputUris: string[] /* ≤5 */; c: number }
+  | { kind: 'map';      jobId: string; fileIdxFrom: number; fileIdxTo: number;   // ≤5 files, inclusive
+                        inputUris: string[] /* ≤5 */; c: number }
   | { kind: 'reduce';   jobId: string; partialIds: string[] /* 2–5 */; partialUris: string[]; c: number }
   | { kind: 'finalize'; jobId: string; partialUri: string; f: number; c: number };
 ```
+
+`map` carries its **file-index range**, not just URIs, because that range is what makes the
+task's identity computable: `dedupe_key = 'map:{jobId}:{fileIdxFrom}'`. The ranges are the
+spawning `generate` task's own `fileIdxFrom..fileIdxTo` chunked by `K_FANIN`, so a retried
+`generate` spawn derives byte-identical keys and conflicts away — a spawn-time counter would
+not, and would mint duplicate map tasks whose extra partials push a job's total count past F
+(DM-006). `inputUris` is not free-form either: it is the single key layout of §7 applied to
+that range, `jobs/{jobId}/inputs/{fileIdx}.csv` for `fileIdx` in `fileIdxFrom..fileIdxTo`,
+held as one shared constant (`INPUT_KEY(jobId, fileIdx)`) that the API, the generate branch of
+T2, and the worker's `BlobStore` all use. Whoever computes a URI computes it from that
+constant; see §4 T2 for the branch that does it.
 
 ## 3. The claim query (queue + fairness in one statement)
 
@@ -125,15 +162,26 @@ candidate AS (
     COALESCE(i.n, 0),                                -- fairness: least-served job first
     t.priority ASC,                                  -- finalize=0 first … generate=3 last
     t.created_at                                     -- FIFO tiebreak
-  LIMIT 1
+  LIMIT 16                                           -- ≈ceil(W_max/2): see the note below
   FOR UPDATE OF t SKIP LOCKED
 )
-UPDATE tasks SET status='claimed', worker_id=$1, attempts=attempts+1,
+UPDATE tasks t SET status='claimed', worker_id=$1, attempts=attempts+1,
                  lease_token = gen_random_uuid(),
-                 lease_expires_at = now() + interval '30 seconds'
-WHERE id = (SELECT id FROM candidate)
-RETURNING id, type, payload, lease_token;
+                 claimed_at  = now(),
+                 lease_expires_at = now() + interval '30 seconds',
+                 deadline_at = now() + make_interval(secs =>       -- per-type ceiling (§8),
+                   CASE t.type WHEN 'generate' THEN $2             -- read off the row's own
+                               ELSE $3 END)                        -- type, not the caller's guess
+WHERE t.id = (SELECT id FROM candidate LIMIT 1)       -- one task per claim, still
+RETURNING t.id, t.type, t.payload, t.lease_token, t.deadline_at;
 ```
+
+**All lease and deadline arithmetic uses the DB's `now()`; workers never send timestamps.**
+`claimed_at`, `deadline_at`, and `lease_expires_at` are written by the statements above and by
+the heartbeat below, all server-side, so worker clock skew cannot lengthen a lease or move a
+deadline. The only worker-supplied numbers are `$2`/`$3` — the `TASK_DEADLINE_SECONDS` config
+constants (§8), not clock readings — and the row's own `type` selects between them, so a
+claimer cannot mis-deadline a task by mispredicting what it will get.
 
 Notes:
 - All transactions run at **READ COMMITTED** (Postgres default) — deliberate: every
@@ -142,24 +190,30 @@ Notes:
   its row lock at write time; nothing relies on snapshot stability, so no serialization
   retries exist to handle.
 - `SKIP LOCKED` gives W concurrent claimers W distinct rows — this *is* the queue
-  (DM-004). Contended-head caveat: with `LIMIT 1`, a claimer whose one candidate is
-  locked gets zero rows, not the next row; the worker retries once immediately before
-  falling back to `IDLE_POLL_MS`. (Alternative if measured: `LIMIT ceil(W/4)` in the
-  CTE, update the first survivor.)
+  (DM-004). **Why the CTE takes 16 rows and not 1:** `LIMIT 1` makes every idle claimer
+  compute the *same* single winner, so at W workers one wins and W−1 get zero rows and
+  sleep `IDLE_POLL_MS` with work still pending — an idle-time bug in the exact system
+  whose thesis is minimal idling. `LIMIT 16` (≈`ceil(W_max/2)`, W_max=32 per DM-008) locks
+  a window instead of a point; `SKIP LOCKED` hands each claimer a different surviving row,
+  and the UPDATE's `LIMIT 1` keeps the one-task-per-claim contract. A claimer only sleeps
+  when all 16 head candidates are contended, which needs >16 simultaneous claims against a
+  queue that short.
 - The `inflight` CTE computes per-job counts once per claim (DM-007's own form) — a
   correlated-subquery-in-ORDER-BY form would evaluate it once per pending row (up to
-  20k rows) and could not use `idx_tasks_claim`.
+  20k rows) and could not use `idx_tasks_claim`. It reads `idx_tasks_inflight`.
 - Lease = 30 s, heartbeat extends every 10 s, reaper polls every 5 s → worst-case
   crash-detection latency 35 s. Short lease is safe *because* heartbeats extend it.
   Heartbeat SQL is itself fenced — by token AND status, since a token the reaper
   hasn't rotated would otherwise still match:
   `UPDATE tasks SET lease_expires_at = now() + interval '30 seconds'
    WHERE id=$t AND lease_token=$mine AND status='claimed'
-     AND lease_expires_at < to_timestamp($claimed_at + TASK_DEADLINE_SECONDS)`
-  — the deadline conjunct means a wedged-but-heartbeating worker (hung blob GET behind
-  a live heartbeat thread) cannot hold a task past `TASK_DEADLINE_SECONDS` (DM-006).
+     AND lease_expires_at < deadline_at`
+  — every term is a column or the DB's `now()`; the worker sends only its task id and
+  token. The deadline conjunct means a wedged-but-heartbeating worker (hung blob GET
+  behind a live heartbeat thread) cannot push its lease past the `deadline_at` stamped at
+  claim time (DM-006).
 
-## 4. The three critical transactions
+## 4. The four critical transactions
 
 ### T1 — job submission (API)
 
@@ -167,9 +221,13 @@ Notes:
 BEGIN;
   -- admission control (v2): reject 413 if F×C×8 > MAX_JOB_BYTES;
   -- 429 + Retry-After if active jobs ≥ MAX_ACTIVE_JOBS
-  INSERT INTO jobs (f, c, idempotency_key) VALUES ($f, $c, $key) 
-    ON CONFLICT (idempotency_key) DO NOTHING;        -- v2: retried POST returns the
-  -- 0 rows → return 200 with the existing jobId     --     original job, never a twin
+  INSERT INTO jobs (f, c, idempotency_key) VALUES ($f, $c, $key)
+    ON CONFLICT (idempotency_key) DO NOTHING
+    RETURNING id;                                    -- v2: retried POST returns the
+                                                     --     original job, never a twin
+  IF 0 rows:                                         -- the key already exists
+    SELECT id FROM jobs WHERE idempotency_key=$key;   -- the original
+    COMMIT; return 200 {jobId}                        -- no new tasks, no new events
   -- seed generate tasks in batches of GEN_BATCH=50 files
   INSERT INTO tasks (job_id, type, priority, payload) SELECT … ;  -- ⌈F/50⌉ rows
   UPDATE jobs SET status='running' WHERE id=$jobId;
@@ -178,8 +236,10 @@ COMMIT;
 ```
 
 Transactional enqueue: job row and its seed tasks are atomic — no half-submitted jobs
-(DM-004). (`jobs.idempotency_key TEXT UNIQUE NULL` — nullable; without the header,
-duplicate submission creates a distinct job by design, since F and C carry no identity.)
+(DM-004). `jobs.idempotency_key` is nullable and uniquely indexed only where non-null
+(§1), so without the header duplicate submission creates a distinct job by design, since F
+and C carry no identity. The 0-row path must *select* the original id, not infer it: the
+conflicting row was written by an earlier request whose id this one never saw.
 
 ### T2 — task completion + eager pairing (worker; the heart of the system)
 
@@ -192,19 +252,41 @@ BEGIN;
   -- 0 rows → lease was reaped & task reassigned (zombie worker) → ROLLBACK, discard.
   -- The PUT already done is harmless: deterministic key, byte-identical content.
 
-  IF task.type IN ('map','reduce'):
-    inserted = INSERT INTO partials (job_id, uri, count, produced_by) VALUES (…)
-      ON CONFLICT (produced_by) DO NOTHING RETURNING id;   -- idempotent metadata
-    -- no row returned → a prior commit of this task already ran pairing → skip it
+  IF task.type = 'generate':
+    -- This branch computes the payloads of the map tasks it spawns. Nothing else does.
+    -- For each ≤K_FANIN chunk of this task's own fileIdxFrom..fileIdxTo:
+    INSERT INTO tasks (job_id, type, priority, payload, dedupe_key)
+      VALUES ($jobId, 'map', 2,
+              {kind:'map', jobId, fileIdxFrom: chunkFrom, fileIdxTo: chunkTo, c,
+               inputUris: [INPUT_KEY($jobId, i) for i in chunkFrom..chunkTo]},
+              'map:' || $jobId || ':' || chunkFrom)
+      ON CONFLICT (dedupe_key) DO NOTHING;           -- a retried generate re-derives the
+                                                     -- identical keys and inserts nothing
+    -- inputUris come from the ONE key layout (§2, §7); the chunk boundaries are this
+    -- task's range divided by K_FANIN, so they are a pure function of the payload.
 
-    -- EAGER PAIRING (DM-003), serialised per job:
-    SELECT pg_advisory_xact_lock(hashtext($jobId::text));
+  IF task.type IN ('map','reduce'):
+    INSERT INTO partials (job_id, uri, count, produced_by) VALUES (…)
+      ON CONFLICT (produced_by) DO NOTHING;          -- idempotent metadata
+
+    -- EAGER PAIRING (DM-003) runs UNCONDITIONALLY here — see below — serialised per job:
+    SELECT pg_advisory_xact_lock(hashtext('pairing'), hashtext($jobId::text));
     -- Why a lock and not SKIP LOCKED on partials: under READ COMMITTED two
     -- concurrent T2s could each undercount the partial set AND each see the other's
-    -- task as still 'claimed' — both decline to pair, and since pairing only runs
-    -- on partial commit, the job would strand its last partials forever (reachable
-    -- at F=7, W=2). The advisory lock serialises the section (milliseconds); the
+    -- task as still 'claimed' — both decline to pair, and with pairing triggered only
+    -- by a commit, the job would strand its last partials forever (reachable at
+    -- F=7, W=2). The advisory lock serialises the section (milliseconds); the
     -- second pairer sees the first's committed partial and its task row as 'done'.
+    -- Two-key form: the 'pairing' namespace keeps these locks from colliding with any
+    -- other advisory-lock use, and the int4 key space means the worst a hash collision
+    -- can do is serialise two unrelated jobs' pairing steps (throughput, not safety).
+
+    IF job.status <> 'running' → skip pairing        -- a cancelled or terminal job creates
+                                                     -- no new reduce work (§6's designed
+                                                     -- 'cancelled' status stops the tree
+                                                     -- growing, not just the claiming); the
+                                                     -- finalize enqueue below is the CAS
+                                                     -- anyway, so this is belt-and-braces
 
     SELECT id, uri, count FROM partials
       WHERE job_id=$jobId AND consumed_by IS NULL
@@ -217,11 +299,17 @@ BEGIN;
     ELIF exactly 1 row AND count == F      → CAS: UPDATE jobs SET status='finalizing'
                                                   WHERE id=$jobId AND status='running';
                                              1 row → INSERT finalize task
+                                                     (max_attempts=10, see T3)
                                              0 rows → someone finalized already: no-op
-    ELSE                                   → nothing (a later commit will pair it —
-                                             guaranteed: some task for this job is
-                                             still pending/claimed, else a drain or
-                                             finalize branch would have fired)
+    ELSE                                   → nothing IF some task for this job is still
+                                             pending/claimed (a later commit pairs it).
+                                             IF pending+claimed == 0 the invariant is
+                                             broken — 1 partial with count<F and no work
+                                             left — so assert and alert rather than
+                                             silently no-op:
+                                             INSERT INTO events (type, job_id, payload)
+                                               VALUES ('job.stranded',
+                                                       $jobId, {partials:[{id,count}…]});
 
     IF took k rows:
       new_reduce_id = INSERT INTO tasks (type='reduce', priority=1, payload={partialIds, partialUris});
@@ -233,32 +321,114 @@ BEGIN;
 COMMIT;
 ```
 
+**Pairing runs on every successful fenced commit, not only when the partial INSERT
+returned a row.** The tempting shortcut — "`ON CONFLICT DO NOTHING` matched, so a prior
+commit of this task already paired; skip" — reopens the stranding hole from the other side.
+A task that was reaped after inserting its partial but before its commit landed will be
+retried; its second commit sees the conflict, skips pairing, and no further pairing trigger
+for that job exists, so the job ends holding unconsumed partials forever. The partial
+INSERT's idempotency protects the *row*; it says nothing about whether the *decision* has
+been made. Pairing is itself idempotent under the job lock — it reads current state and
+either takes rows or does not — so running it twice costs one indexed read, and skipping it
+once costs the job. Hence: fenced update succeeds ⇒ pairing runs.
+
 Concurrent committers for the *same job* queue on the advisory lock for milliseconds;
-committers for different jobs don't interact (the lock is per-job). The ELSE branch is
-now provably safe: it is only reachable while other tasks of the job are in flight,
-and each of those has its own T2 that re-evaluates pairing.
+committers for different jobs don't interact (the lock is per-job). The trigger set for
+pairing is therefore exactly: **T2 after every successful fenced commit, and T3 for every
+job whose task it touches** — which together leave no state in which a job has unconsumed
+partials and no future pairing evaluation.
 
 ### T3 — reaper (supervisor, every 5 s)
 
 ```
-UPDATE tasks SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
-               worker_id = NULL, lease_expires_at = NULL,
-               lease_token = NULL          -- rotate the fence on requeue so a stale
-                                           -- token can never match a future state
+requeued = UPDATE tasks
+      SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
+          worker_id = NULL, lease_expires_at = NULL, claimed_at = NULL,
+          lease_token = NULL          -- rotate the fence on requeue so a stale
+                                      -- token can never match a future state
  WHERE status='claimed'
    AND (lease_expires_at < now()
-        OR now() > claimed_at + TASK_DEADLINE_SECONDS);  -- absolute deadline: reclaims
-                                           -- wedged-but-heartbeating holders (DM-006)
+        OR now() > deadline_at)       -- absolute per-type deadline, stamped at claim
+                                      -- time (§3): reclaims wedged-but-heartbeating
+                                      -- holders (DM-006)
+ RETURNING id, job_id, status;
 -- attempts is incremented at CLAIM time only (T-claim); the CASE above reads the
 -- already-incremented value. Incrementing here too would double-count.
+
+-- T3 ALSO PAIRS. For each DISTINCT job_id in `requeued`, in its own transaction (the lock
+-- is xact-scoped, so one job's pairing must not hold the next one's), run the identical
+-- pairing step under the identical lock:
+FOR EACH job_id IN requeued:
+  BEGIN;
+    SELECT pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text));
+    <the pairing step of T2, verbatim>
+  COMMIT;
+-- Why: T2's pairing only fires on a *successful* commit, and a reaped task never
+-- commits. Without this, the sequence {task inserts its partial → is reaped → retried
+-- attempt's fenced commit matches 0 rows or dies too} leaves a job with unconsumed
+-- partials and no future trigger. Pairing is idempotent under the lock, so running it
+-- from the reaper is free when nothing needs pairing and load-bearing when something
+-- does. Together with T2 this closes the trigger set: every transition that can change
+-- a job's pairing eligibility is followed by a pairing evaluation.
+
 UPDATE jobs SET status='failed', error='task exhausted retries: …'
- WHERE id IN (SELECT DISTINCT job_id FROM tasks WHERE status='dead');
+ WHERE id IN (SELECT DISTINCT job_id FROM tasks WHERE status='dead')
+   AND status IN ('running','finalizing')      -- status guard: without it this statement
+                                               -- rewrites already-failed jobs every 5 s
+                                               -- forever and can clobber a job that
+                                               -- completed after its dead task
+   AND NOT EXISTS (                            -- and never bury a finished computation:
+     SELECT 1 FROM partials p
+      WHERE p.job_id = jobs.id AND p.consumed_by IS NULL AND p.count = jobs.f);
+-- The excluded case gets an event instead — the answer exists, only the divide is left:
+INSERT INTO events (type, job_id, payload)
+  SELECT 'job.needs_finalize', id, '{}' FROM jobs
+   WHERE status IN ('running','finalizing')
+     AND EXISTS (SELECT 1 FROM tasks t WHERE t.job_id=jobs.id AND t.status='dead')
+     AND EXISTS (SELECT 1 FROM partials p WHERE p.job_id=jobs.id
+                   AND p.consumed_by IS NULL AND p.count = jobs.f);
 
 -- Backstop sweep (DM-003): jobs in ('running','finalizing') with zero pending/claimed
--- tasks should not exist (T2's advisory-lock pairing always fires completion). If
--- found: log loudly; if a count==F partial exists, enqueue finalize. With the v2
--- advisory lock this is a true bug detector, not a mechanism.
+-- tasks. If found: log loudly; if a count==F partial exists, reset the job to
+-- 'finalizing' and re-enqueue finalize. T3's own pairing step above makes this state
+-- unreachable, so the sweep is redundant-but-retained instrumentation — a cheap
+-- independent check on the pairing trigger set, not a mechanism the design relies on.
 ```
+
+**Why `finalize` gets `max_attempts = 10`.** Every other task type can be re-derived from
+its inputs, so exhausting 3 attempts loses seconds of work. A `finalize` that dies on its
+third attempt strands a *completed computation*: the `count == F` partial exists, the whole
+job's work is in it, and flipping the job to `failed` is irreversible — the claim query
+serves only `('running','finalizing')`, so a re-enqueued finalize task on a `failed` job can
+never be claimed. The task itself is one idempotent 8 MB read, a divide, and a PUT, so ten
+attempts cost ~20 s of worst-case retry against hours of discarded work. Belt and braces:
+the `NOT EXISTS` guard above refuses to fail such a job at all, and the backstop can reset
+it to `finalizing` and re-enqueue.
+
+### T4 — executor failure (worker)
+
+An exception inside `execute()` — a blob GET that raised after its bounded retries, a
+malformed input, a bug — is not a lost lease and must not wait for one. The worker requeues
+its own task, fenced identically to T2:
+
+```
+UPDATE tasks
+   SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
+       worker_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+       claimed_at = NULL, last_error = $err
+ WHERE id=$taskId AND lease_token=$myToken AND status='claimed';
+-- 0 rows → we were already reaped; the reaper's requeue stands. Discard and move on.
+```
+
+**Requeue *is* the retry** — there is no transient `failed` state to pass through and no
+backoff timer, which is why `task_status` has no `'failed'` value (§1). The claim query's
+fairness ordering supplies the spacing a backoff would: a requeued task re-enters at the
+back of its job's FIFO tiebreak, and its job's `inflight` count no longer includes it, so
+another job's work is served in between. Recording `last_error` on the row keeps the cause
+attached to the thing that failed rather than in a log line nobody correlates. A task that
+reaches `attempts >= max_attempts` here goes straight to `dead` and is picked up by T3's
+job-failure statement on its next pass — with T3's guards, so a `dead` finalize on a job
+that still holds its `count == F` partial raises `job.needs_finalize` instead of failing it.
 
 ## 5. Worker (Python) — structure & loop
 
@@ -270,8 +440,8 @@ classDiagram
         -speed_factor: float
     }
     class TaskClaimer {
-        +claim() Task|None  "T1 claim query"
-        +heartbeat(task_id) "extend lease +30s (fenced by lease_token)"
+        +claim() Task|None  "§3 claim query (execute connection)"
+        +heartbeat(task_id) "extend lease +30s, fenced; OWN connection"
     }
     class Executor {
         <<dispatch on payload.kind>>
@@ -282,7 +452,7 @@ classDiagram
     class ReduceExec   { +run() "GET 2–5 f64 → vector add → PUT f64" }
     class FinalizeExec { +run() "GET f64 → ÷F → PUT result.csv" }
     class BlobStore    { +get(uri) bytes; +put(uri, bytes) "S3 API: MinIO/S3" }
-    class Committer    { +commit_done(task, outputs) "T2 incl. eager pairing" }
+    class Committer    { +commit_done(task, outputs) "T2 incl. eager pairing" ; +commit_failed(task, err) "T4" }
 
     WorkerMain --> TaskClaimer
     WorkerMain --> Executor
@@ -303,11 +473,26 @@ def run(self):
             idle_sleep(0.5 + jitter())           # bounded poll; LISTEN/NOTIFY evolution noted
             continue
         set_worker(busy, task.id)
-        with heartbeat_every(10, task.id):       # background lease extension
-            outputs = executor.execute(task)     # pure compute + blob I/O, NO db writes
-            committer.commit_done(task, outputs) # T2: single transaction
+        try:
+            with heartbeat_every(10, task.id):   # covers EXECUTE ONLY — see below
+                outputs = executor.execute(task) # pure compute + blob I/O, NO db writes
+            # heartbeat thread has stopped here; the execute connection is now idle
+            committer.commit_done(task, outputs) # T2: single multi-statement transaction
+        except Exception as err:
+            committer.commit_failed(task, err)   # T4: fenced requeue-or-dead
         set_worker(idle)
 ```
+
+**Two Postgres connections per worker, and the heartbeat stops before T2 begins.** The
+`with heartbeat_every(...)` block wraps `execute` and *not* the commit, for a reason that is
+easy to get wrong: T2 is a multi-statement transaction, and libpq connections are not
+thread-safe for concurrent use, so a heartbeat firing on the same connection mid-T2 would
+interleave a statement into an open transaction — silently making the heartbeat part of T2
+(rolled back with it) at best, and corrupting the protocol stream at worst. So the heartbeat
+lives on its own dedicated connection (that is why there are two), and it also *exits* before
+T2 opens: once execution is done there is nothing left to keep a lease alive for, and a
+heartbeat racing a fenced commit can only extend a lease the commit is about to retire. Pool
+sizing follows from this: `2W` worker connections plus the API's pool (§8).
 
 Execution discipline that makes everything else true:
 - **Execute is side-effect-free except deterministic PUTs.** Output keys are
@@ -331,7 +516,7 @@ Execution discipline that makes everything else true:
 | `GET /jobs/:id/result` | — | `302` → 15-min pre-signed GET \| `?inline=1` streams \| `409` until `completed` | keeps the API off the data plane (DM-005 owns this decision) |
 | `GET /system/stats` | — | `{workers:{desired,alive,busy,idle}, jobs:{queued,running,completed,failed}, tasks:{…}, throughput, oldest_pending_age_sec, oldest_claimed_age_sec}` | UI poll fallback; the two age gauges are the stall SLIs (DM-009) |
 | `PATCH /system/workers` | `{desired}` | `200 {desired}` | bonus: writes `system_config`; supervisor reconciles (DM-008) |
-| `GET /events` | SSE | `text/event-stream` | tails `events` table (id > Last-Event-ID) (DM-009) |
+| `GET /events` | SSE | `text/event-stream` | tails `events` table (`id > Last-Event-ID AND ts < now() - interval '1 second'` — the visibility lag is the resume guarantee, §1) (DM-009) |
 
 **API conventions (v2):** request validation with zod at the edge, mirroring the DDL
 CHECKs; error bodies `{error:{code,message,details}}`; `400` malformed / `422`
@@ -366,7 +551,10 @@ bucket: distributed-mean
   zero parsing (DM-005). `count` lives in the partials row (authoritative) and object
   metadata (debug).
 - GC: on job completion, `inputs/` and `partials/` deleted async (config-gated so the
-  demo can keep them for inspection).
+  demo can keep them for inspection). The same pass deletes the job's `partials` rows —
+  including the root partial, whose `consumed_by` stays NULL forever because `finalize`
+  reads it rather than consuming it into another partial. It is the one row the
+  `idx_partials_avail` index would otherwise accumulate per completed job.
 
 ## 8. Configuration
 
@@ -375,10 +563,12 @@ bucket: distributed-mean
 | `K_FANIN` | 5 | the RAM constraint; single source of truth |
 | `GEN_BATCH` | 50 | files per generate task |
 | `LEASE_SECONDS` / `HEARTBEAT_SECONDS` / `REAPER_SECONDS` | 30 / 10 / 5 | liveness; worst-case crash detection 35 s (DM-006) |
-| `TASK_DEADLINE_SECONDS` | 300 | absolute per-task ceiling — heartbeats can't extend past it; reclaims wedged-but-heartbeating workers (DM-006) |
+| `TASK_DEADLINE_SECONDS` | `{map:300, reduce:300, finalize:300, generate:1800}` | absolute per-task ceiling, stamped as `deadline_at` at claim time — heartbeats can't extend past it; reclaims wedged-but-heartbeating workers (DM-006). **Per-type because the types are not comparable:** a `map` moves ~108 MB (~2.2 s), so 300 s is ~135× headroom; a `generate` batch writes 50 × ~20 MB ≈ 1,000 MB, ~20 s at the 50 MB/s model and ~200 s on a 10× straggler — 300 s would reap healthy generate tasks under exactly the heterogeneity NFR-2 demands we tolerate |
+| DB connections per worker | 2 | one for claim/execute/commit (T2 is a multi-statement txn), one dedicated to the heartbeat thread (libpq is not thread-safe per connection) — §5 |
+| DB pool sizing | `2W + API pool (10)` | at W_max=32: 74 connections; past that, PgBouncer (DM-004) |
 | `MAX_JOB_BYTES` / `MAX_ACTIVE_JOBS` | 50 GB local (5 GB demo) / 8 | admission control; unset on AWS |
 | blob client timeouts | connect 5 s, read 30 s, ≤3 retries | a hung GET fails instead of hanging the task |
-| `MAX_ATTEMPTS` | 3 | then task dead → job failed |
+| `MAX_ATTEMPTS` | 3 (`finalize`: 10) | then task dead → job failed (T4/T3). `finalize` is exempted because failing it discards a completed computation, and the task is one idempotent read + divide (§4 T3) |
 | `IDLE_POLL_MS` | 500 | worker poll when queue empty |
 | `SPEED_FACTOR` | 1.0 | per-worker artificial slowdown (demo) |
 | `DESIRED_WORKERS` seed | 4 | initial W; runtime value in `system_config` |
@@ -394,8 +584,9 @@ services:
 ```
 
 **Runbook (v2):** `make up` (compose up + node-pg-migrate applied by the API on boot +
-`mc mb` init container creates the bucket) · `make demo F=1000 C=100000` (~3 min at
-W=4, per the service-time model in 01 §4) · `make chaos` (demo + kill a busy worker) ·
+`mc mb` init container creates the bucket) · `make demo F=1000 C=100000` (284 tasks:
+20 generate + 200 map + 63 reduce + 1 finalize ≈ 630 worker-seconds ≈ **2.6 min at W=4**,
+per the service-time model in 01 §4) · `make chaos` (demo + kill a busy worker) ·
 `make test`. Why Postgres and not SQLite for a laptop demo: SQLite has no
 `SKIP LOCKED`, a single writer, no `LISTEN/NOTIFY`, and RDS is the deployment target —
 the demo must exercise the same concurrency the design argues about.
@@ -412,7 +603,10 @@ the demo must exercise the same concurrency the design argues about.
    then sees the full partial set (INV-1/INV-2 hold; the mutual-decline race is
    unreachable).
 3. **Chaos demo:** `docker kill` a busy worker → lease expires → task re-claimed →
-   job completes; result still exact (idempotent PUT).
+   job completes; result still exact (idempotent PUT). Sharpened variant for the T3
+   pairing trigger: kill the worker *after* its partial INSERT would have landed, so the
+   retry's commit hits `ON CONFLICT` — assert the job still pairs and completes, and that
+   the backstop sweep never fires.
 4. **Straggler demo:** 3 workers at SPEED_FACTOR 1/3/10; assert fast worker's task
    count ≈ proportional, total idle time ≈ 0 while eligible tasks exist.
 5. **Fairness demo:** submit F=5000 job, then F=8 job 5 s later → F=8 completes far

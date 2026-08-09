@@ -194,8 +194,16 @@ WHERE t.status = 'pending' AND j.status IN ('running','finalizing')
 ORDER BY coalesce(i.n, 0) ASC,          -- 1. fairness across jobs
          t.priority ASC,                 -- 2. priority ASC: finalize=0 first, then reduce=1, map=2, generate=3
          t.created_at ASC                -- 3. age, within a job
-FOR UPDATE SKIP LOCKED LIMIT 1;
+LIMIT 16 FOR UPDATE SKIP LOCKED;         -- window, not point: the caller updates the
+                                         -- first surviving row (LLD §3)
 ```
+
+The `LIMIT 16` (≈`ceil(W_max/2)`, W_max=32 per DM-008) is a fairness detail, not a
+performance one: with `LIMIT 1` every idle worker computes the *same* single winner, so one
+claim succeeds and the rest get zero rows from `SKIP LOCKED` and go back to sleep with work
+still pending. Locking a window instead of a point hands each concurrent claimer a different
+surviving row; the enclosing UPDATE still takes exactly one (LLD §3), so one claim is still
+one task.
 
 Three terms, in this order, each doing a distinct job. **Note the sort direction on term 2.**
 `priority` is stored ascending-urgent — `finalize=0 < reduce=1 < map=2 < generate=3` (LLD §1) —

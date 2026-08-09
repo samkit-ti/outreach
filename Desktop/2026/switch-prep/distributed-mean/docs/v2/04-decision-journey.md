@@ -117,8 +117,11 @@ job loses ~0.01%. [DM-007](itds/DM-007-multi-job-fairness.md)
 - *Weighted fair queuing*: needs tenant semantics that don't exist — deferred (§4).
 
 **What happens when a worker dies mid-task?**
-→ **30 s lease + 10 s heartbeat + 5 s reaper** — detection ≤ 35 s, task requeued,
-three attempts then the job fails loudly. [DM-006](itds/DM-006-state-model-failure-handling.md)
+→ **30 s lease + 10 s heartbeat + 5 s reaper, under an absolute per-type deadline
+(300 s map/reduce/finalize, 1800 s generate — a generate batch moves ~1,000 MB)** —
+detection ≤ 35 s, task requeued, three attempts then the job fails loudly (`finalize`
+gets ten, because failing it would discard a finished computation).
+[DM-006](itds/DM-006-state-model-failure-handling.md)
 - *At-most-once*: silently loses work.
 - *2PC/exactly-once*: unattainable across queue + object store; costs latency chasing it.
 - *External membership service (ZK/etcd)*: a second stateful system for what a column does.
@@ -194,9 +197,11 @@ ALB** — a configuration change, not a rewrite. [HLD §6](02-hld.md) *(no conte
 | F ≤ 5 | One map yields count = F directly; no reduce runs; no special path. | DM-001 |
 | F not divisible by 5 | Remainder rides as a smaller map; (Σ, n) makes unequal groups correct. | DM-001 |
 | < 5 partials left, nothing else running | Drain mode reduces at fan-in 2–4 instead of waiting forever. | DM-002 |
-| Last two partials commit simultaneously | Per-job advisory lock serialises pairing; the second sees the first. | DM-002, LLD §4 |
+| Last two partials commit simultaneously — or the reaper requeues concurrently | Per-job advisory lock serialises pairing; the second sees the first. T3 also pairs, under the same job lock, for every job whose task it requeues — so a reaped task's missing commit is not a missing trigger. | DM-002, DM-003, LLD §4 |
 | Worker crashes holding a task | Lease expires ≤ 35 s; requeue; deterministic keys make the retry harmless. | DM-006 |
-| Worker wedged, heartbeat alive | Absolute 300 s task deadline; heartbeats cannot extend past it. | DM-006 |
+| Worker wedged, heartbeat alive | Absolute per-type task deadline (300 s map/reduce/finalize, 1800 s generate); heartbeats cannot extend past it. | DM-006 |
+| Executor raises inside a task | T4: the worker requeues its own task, fenced by its lease token; requeue *is* the retry, so there is no transient `failed` state. | DM-006, LLD §4 |
+| `finalize` exhausts its attempts | `finalize` gets 10 attempts, and a job holding an unconsumed `count = F` partial is never flipped to `failed` — the reaper emits `job.needs_finalize` instead. | DM-006, LLD §4 |
 | Zombie commits after reaping | Fenced commit matches zero rows; earlier PUT is byte-identical to the retry's. | DM-006 |
 | Same reduce delivered twice | Input set fixed at creation; both runs read the same inputs, write the same key. | DM-006 |
 | Duplicate `POST /jobs` | `Idempotency-Key` returns the original job; absent it, distinct by design. | LLD §6 |
@@ -205,7 +210,7 @@ ALB** — a configuration change, not a rewrite. [HLD §6](02-hld.md) *(no conte
 | Queue empty, job unfinished | Never read as done — completion is the count = F proof, not queue depth. | DM-003 |
 | Reaper or supervisor down | Late lease expiry / W drift: degraded, never incorrect. | DM-006 |
 | Database down | System pauses; no state lost or corrupted. | DM-006 |
-| Object store errors | Bounded client timeouts fail the task into the normal retry path. | DM-006 |
+| Object store errors | Bounded client timeouts fail the task into the normal retry path — which is T4's requeue, the same path a crash takes. | DM-006 |
 | Progress under dynamic task creation | Coverage-based and monotone; only finalize reports 100%. | DM-009 |
 
 ---

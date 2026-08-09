@@ -27,12 +27,13 @@ last piece of work, with no polling component and no counter that redelivery can
 
 - **A partial is `(sum_vector, count)`** where `count` is the number of *input files*
   the partial covers (D2). Never a mean — dividing happens exactly once, in `finalize`.
-- **The eager-pairing transaction already exists** (D3). On every partial commit, inside
-  the same DB transaction, we take a per-job advisory lock
-  (`pg_advisory_xact_lock(hashtext(job_id::text))`) and read the job's unconsumed partials
+- **The eager-pairing transaction already exists** (D3). On every successful task commit,
+  inside the same DB transaction, we take a per-job advisory lock
+  (`pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`) and read the job's unconsumed partials
   with `SELECT … FOR UPDATE ORDER BY created_at` to decide whether to enqueue a `reduce`.
-  Completion detection is one more branch in a transaction we are already paying for —
-  not a new mechanism.
+  The reaper takes the same lock and runs the same step for jobs whose tasks it requeues,
+  so the trigger covers reaped tasks that never commit. Completion detection is one more
+  branch in a transaction we are already paying for — not a new mechanism.
 - **`count == F` is reachable at exactly one moment.** The root of the reduction covers
   all F files; nothing else does.
 - **At-least-once delivery is the default** (D7): a task may be redelivered after a
@@ -146,7 +147,7 @@ pending or claimed for the job, CAS the job to `finalizing` and enqueue `finaliz
 - The condition is derived from the data itself and backed by the conservation
   invariant, so it cannot be true early or false late.
 - Zero added latency and zero added components: it is a branch in a transaction that
-  already runs on every partial commit.
+  already runs on every successful task commit.
 - Redelivery-safe for free, because the consumed-guard already makes it so (below).
 
 **Cons:**
@@ -186,7 +187,7 @@ Treat "the queue has no messages" as completion.
 every partial commit, in the same transaction that commits the partial, we evaluate the
 job's unconsumed partials:
 
-0. Take the per-job advisory lock `pg_advisory_xact_lock(hashtext(job_id::text))`, then
+0. Take the per-job advisory lock `pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`, then
    read the unconsumed partials with `SELECT … FOR UPDATE ORDER BY created_at`. This
    serialises the whole pairing/completion decision per job.
 1. ≥5 unconsumed partials → claim 5, enqueue a `reduce` (steady state).
@@ -246,7 +247,7 @@ worst-case detection; D7). Four guards interlock:
    duplicate evaluation matches 0 rows and is a no-op rather than a second result file.
    Contrast the counter alternative, where a duplicate *event* is a duplicate decrement
    and permanently corrupts the trigger.
-4. **Pairing is serialised per job** (`pg_advisory_xact_lock(hashtext(job_id::text))`, D3).
+4. **Pairing is serialised per job** (`pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`, D3).
    Two committing transactions therefore cannot both undercount the partial set and both
    decline — the ELSE branch is only ever taken by the last committer with a complete
    view. Without this, `SKIP LOCKED` on the partials read plus READ COMMITTED lets each of
@@ -254,6 +255,16 @@ worst-case detection; D7). Four guards interlock:
    `claimed`, so both decline to pair and ≥2 partials strand forever with nothing left to
    re-trigger pairing. The lock removes that state from the reachable set rather than
    detecting it afterwards.
+5. **Every transition that can change pairing eligibility is followed by a pairing
+   evaluation** — which is a stronger statement than "pairing runs on partial commit", and
+   the difference is exactly the reaper. T2 pairs after *every* successful fenced
+   task-update, including one whose partial `INSERT` hit its `ON CONFLICT` (a task reaped
+   after inserting its partial but before committing gets retried, and skipping pairing on
+   that retry's conflict would strand the job). And T3 pairs, under the same per-job lock,
+   for every job whose task it requeues or kills — because a reaped task never commits, so
+   it has no T2 to carry the trigger. Idempotent evaluation is what makes this affordable:
+   pairing reads current state under the lock and either takes rows or does not, so an
+   unnecessary run costs one indexed read.
 
 The general shape: **idempotent state predicates survive at-least-once delivery;
 mutable event counters do not, without extra per-task bookkeeping.** The advisory lock is
@@ -274,20 +285,35 @@ below), never as the primary path. *Queue-empty detection* was rejected because 
 wrong under the brief's multi-job requirement and racy even single-job, since depth zero
 does not mean claimed-and-uncommitted work is absent.
 
-**Retained backstop (not the primary path).** The reaper (5 s interval, enforcing the 30 s
-lease against 10 s heartbeats — D7) also runs a cheap sweep over jobs in state `running`
-**or `finalizing`** with zero pending and zero claimed tasks. Under the invariant that set
-is always empty: the advisory lock makes the mutual-decline race unreachable, so the sweep
-is now genuinely a **bug detector** rather than an aspirational safety net — if it fires,
-the pairing guard or the consumed-guard is broken. The `finalizing` case covers the
-narrower window where the CAS succeeded but the `finalize` task was lost or its worker
-died permanently. The sweep logs an event and — if a `count == F` partial exists —
-enqueues `finalize`. Firing it should page us.
+**Retained backstop (redundant instrumentation, not a mechanism).** The reaper (5 s
+interval, enforcing the 30 s lease against 10 s heartbeats — D7) also runs a cheap sweep
+over jobs in state `running` **or `finalizing`** with zero pending and zero claimed tasks.
+That set is unreachable by construction, and specifically **because the reaper itself pairs**
+(guard 5 above): the two states that could once produce it — the mutual-decline race, and a
+reaped task whose commit never fires T2's pairing — are closed by the advisory lock and by
+T3's own pairing step respectively. So the sweep detects nothing the design leaves behind; it
+is retained as a *cheap independent check on the trigger set*, the way one keeps an assertion
+in shipped code. It logs an event and — if a `count == F` partial exists — resets the job to
+`finalizing` and re-enqueues `finalize`, which is also the recovery path for a `finalize` task
+that exhausted even its 10 attempts (below).
+
+**A `dead` finalize must not fail the job.** The general rule is "a task that exhausts its
+attempts kills its job with a cause" (D7) — correct for `generate`, `map`, and `reduce`, whose
+work can be re-derived. It is wrong for `finalize`, and irreversibly so: at that point the
+`count == F` partial exists, so the job's entire computation is *finished* and only the divide
+remains, while `failed` is terminal and the claim query serves only `('running','finalizing')`
+— a re-enqueued finalize on a `failed` job can never be claimed. Two changes follow. `finalize`
+carries `max_attempts = 10` rather than 3 (it is one idempotent 8 MB read, a divide, and a
+PUT, so ten attempts cost ~20 s of retry against hours of discarded work). And the reaper's
+job-failure statement **excludes any job still holding an unconsumed partial with
+`count == F`**, emitting the event `job.needs_finalize` for it instead — a job in that state
+needs a worker, not a death certificate.
 
 **Failure condition.** We revisit if any of:
-1. **The backstop sweep ever fires in normal operation** → the invariant is violated
-   (lost or double-consumed partial) and the guard in D3/D7 is broken. Fix the
-   invariant; do not paper over it by promoting the sweep to primary.
+1. **The backstop sweep ever fires in normal operation** → the pairing trigger set is
+   incomplete (a transition that changes pairing eligibility with no evaluation after it) or
+   the consumed-guard is broken. Fix the trigger set or the invariant; do not paper over it
+   by promoting the sweep to primary.
 2. **The unconsumed-partials read becomes a hot spot** — p99 of the eager-pairing
    transaction exceeds ~50 ms, or lock waits appear on the partials index → keep the
    semantic condition but maintain a *derived, transactionally-updated* `unconsumed_count`
@@ -310,6 +336,8 @@ enqueues `finalize`. Firing it should page us.
 | Conservation invariant | Σ `count` over unconsumed partials + files covered by uncommitted tasks == F, at every transaction boundary, 100% of the time | assertion in integration tests; periodic audit query in the reaper sweep |
 | False completion | 0 jobs finalized with a partial whose `count != F` | DB check constraint on `finalize` task creation + result-vector spot check against a single-node reference mean |
 | Backstop firings | 0 in normal operation | count of backstop-sweep events; alert on any non-zero |
+| Pairing trigger coverage | every requeue/kill by the reaper is followed by a pairing evaluation for that job | chaos test: reap a `reduce` task that had already inserted its partial, assert the job still pairs and completes without the backstop firing |
+| `job.needs_finalize` | 0 in normal operation; when injected, the job recovers rather than failing | force 10 finalize failures on an F=1000 job, assert `jobs.status` stays `finalizing` and the backstop re-enqueues |
 | Redelivery safety | 0 duplicate result files and 0 double-consumed partials under injected redelivery | chaos test: force lease expiry on a `reduce` task mid-execution at F = 1000, verify partial `consumed_by` uniqueness and single result object |
 | Multi-job isolation | each concurrent job finalizes on its own condition; no cross-job trigger | run a 25k-task job and a 3-task job concurrently, assert both complete with correct results and independent `finalize` events |
 | Progress counter drift | counters may drift; correctness unaffected | inject a duplicate task completion, assert progress % is wrong-but-recovering while job still completes correctly |

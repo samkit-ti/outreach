@@ -74,7 +74,7 @@ CSV.
   one of those bytes is **read back** by the next level, so ~200 GB read as well. Pure
   overhead relative to the 800 GB of input reads.
 - Requires a transactional claim-and-enqueue (D3), serialised per job by
-  `pg_advisory_xact_lock(hashtext(job_id::text))`, so two concurrent partial commits can
+  `pg_advisory_xact_lock(hashtext('pairing'), hashtext(job_id::text))`, so two concurrent partial commits can
   neither consume the same partial twice nor both undercount the partial set; that is real
   concurrency-control work.
 - Tree shape is nondeterministic run-to-run, so results are reproducible to ~1e-15 but not

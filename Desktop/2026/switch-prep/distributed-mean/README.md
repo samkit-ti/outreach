@@ -50,7 +50,7 @@ race the chosen design against its rejected alternatives (same seed, same worker
 2. `01-requirements-and-assumptions.md` — FR/NFR, assumptions A-1…A-9, envelope + service-time model
 3. `02-hld.md` — architecture, diagrams, why-not-Spark, failure modes, AWS story
 4. `03-lld.md` — schema, claim SQL, the three transactions, worker loop, API spec, runbook
-5. `04-decision-journey.md` — the incremental derivation: 14 steps, each with its proof and refs
+5. `04-decision-journey.md` — every decision by delivery tier (Scope → Bare minimum → MVP → Edge cases → Optimizations), question-framed with proofs and refs
 6. `itds/` — one decision record per load-bearing choice:
 
 | ITD | Decision |

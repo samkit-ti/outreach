@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-001 (aggregation topology), DM-002 (adaptive fan-in / stragglers), DM-004 (queue), DM-005 (storage & formats), DM-006 (idempotency), ../02-hld.md, ../CONTEXT-BRIEF.md
 
 ---
@@ -117,7 +116,7 @@ required by DM-001 *is* the pairwise-summation structure.
 **Cons:**
 - **Not bit-reproducible** across runs, because eager pairing (D3) varies the tree shape and
   float addition is non-associative. Results agree to ~1e-15, which is not the same as
-  agreeing exactly — and a reviewer who diffs two output files will notice.
+  agreeing exactly — and anyone who diffs two output files will notice.
 - Harder to reason about "what exactly was added when" during debugging; the reduction history
   is in the `partials` lineage rather than in a loop.
 - The bound is *O(depth)*, so it degrades if the tree ever becomes lopsided (e.g. a long chain
@@ -235,7 +234,7 @@ no reduced precision.
 
 3. **Distribution is accuracy-*neutral*, and the naive serial loop is the only thing that
    loses — this is the point worth making precisely, because the tempting version of it is
-   wrong.** The intuition under interview pressure is "distribution introduces error." It
+   wrong.** The common intuition is "distribution introduces error." It
    does not. But the honest correction is *not* "we beat numpy": `numpy.mean` /
    `numpy.add.reduce` already sum **pairwise** internally, so a single-node numpy baseline
    carries the same **O(log n · ε)** bound our 5-ary tree does. Our tree is pairwise
@@ -251,7 +250,7 @@ no reduced precision.
    | `numpy.mean` on one node (internally pairwise) | ~log₂ n | ~O(log n) · ε ≈ **1e-15 scale** |
    | Our 5-ary tree (1 leaf level + ~7 reduce levels) | ~8 | ~8 · ε ≈ **8.9 × 10⁻¹⁶** |
 
-   The claim to make in the interview is therefore *"distribution is accuracy-neutral and the
+   The precise claim is therefore *"distribution is accuracy-neutral and the
    naive baseline is the only thing that loses"* — **not** *"we beat numpy."* The tree is
    free either way: it was already mandated by the K = 5 fan-in constraint (a partial is
    file-shaped at 8 MB, so reduces are limited to 5 inputs too, forcing ⌈log₅ 20,000⌉ = 7

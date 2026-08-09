@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-001, DM-003, DM-004, DM-006, DM-007, DM-010, ../02-hld.md, ../CONTEXT-BRIEF.md
 
 ---
@@ -26,7 +25,7 @@ coordination between writers.
 
 ## Context
 
-- **The prompt explicitly permits the easy answer:** "Generated files can be stored on the API's local
+- **The brief explicitly permits the easy answer:** "Generated files can be stored on the API's local
   filesystem or a place of our choosing (e.g. a bucket), as long as workers can pull/read them." So local-FS
   is a *sanctioned* option and must be rejected on real grounds, not dismissed.
 - **Access pattern is write-once, read-once-or-twice, whole-object.** A `generate` task writes ~50 input
@@ -54,7 +53,7 @@ The API writes generated files under `/data/jobs/{jobId}/…`; the same host dir
 every worker container. Partials are written to the same tree.
 
 **Pros:**
-- **Explicitly allowed by the prompt** — zero justification burden, and it is the fastest thing to demo.
+- **Explicitly allowed by the brief** — zero justification burden, and it is the fastest thing to demo.
 - Simplest possible code: `open()` / `read()`, no client library, no credentials, no extra container.
   `os.rename()` on the same filesystem is atomic, giving a free write-temp-then-rename idempotency story.
 - Lowest latency and no network hop for local development; no S3 API semantics to learn.
@@ -252,7 +251,7 @@ jobs/{jobId}/result.csv                           # C means, one per line
    the partial format. Raw float64 makes it **8 MB instead of ~20 MB** (≈200 GB of intermediate writes
    instead of ~500 GB) with **zero parse cost** — `np.frombuffer` is a zero-copy view and summing 5 such
    views is one vectorised add. Meanwhile CSV survives exactly where humans look: inputs (so `head` shows
-   the data) and the result (so the answer is checkable by eye against the prompt's `[1,2,3] + [4,5,6] →
+   the data) and the result (so the answer is checkable by eye against the brief's `[1,2,3] + [4,5,6] →
    [2.5,3.5,4.5]` example). The asymmetry is deliberate: readability at the boundaries, efficiency in the
    interior.
 4. **Both languages read it with no dependency.** Python `np.frombuffer(buf, dtype='<f8')`; TypeScript `new
@@ -271,7 +270,7 @@ instead — an explicit opt-in for a C=1000 toy result, never the path a real co
 Before the job reaches `completed` the endpoint returns **409** with the job's current status rather than
 a redirect to a non-existent object. Completion is discovered by the caller either from the
 `job.completed` SSE event on `GET /events` (DM-009) or by polling `GET /jobs/:id`; **webhooks are out of
-scope** — there is no authenticated caller in v1 to sign a callback to, so a webhook would be an
+scope** — there is no authenticated caller today to sign a callback to, so a webhook would be an
 unauthenticated POST to a client-supplied URL, i.e. an SSRF primitive rather than a feature.
 
 **Why each alternative was rejected, specifically.**

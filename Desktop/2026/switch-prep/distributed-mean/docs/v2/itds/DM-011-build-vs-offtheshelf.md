@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** introduced in v2 (adversarial review flagged the unasked framing question)
 **Related:** DM-001 (topology), DM-003 (completion), DM-004 (queue), DM-008 (worker runtime — rejects Celery/RQ/Ray for the *worker* layer), ../02-hld.md §1, ../CONTEXT-BRIEF.md
 
 ---
@@ -13,8 +12,8 @@
 Index-wise mean over F files (up to ~10⁵ files / ~800 GB) is a solved problem in every
 mature data-parallel engine: Spark computes it in ~6 lines of `treeAggregate`, Dask in
 a handful of `dask.array` calls, and dynamic fan-out with durable child tasks is the
-canonical Temporal demo. Before designing anything, the framing question a senior
-reviewer will ask must be answered: **why is this system built from primitives (API +
+canonical Temporal demo. Before designing anything, the framing question must be
+answered up front: **why is this system built from primitives (API +
 Postgres + object store + bare Python workers) instead of adopting an engine whose
 whole job is distributed aggregation?** An unexamined "we just built it" reads as
 not-invented-here; an examined decision is a strength.
@@ -23,11 +22,11 @@ not-invented-here; an examined decision is a strength.
 
 ## Context
 
-- The prompt **fixes the component list**: NodeJS/Express/TS API, a DB, a queue ("any
-  kind"), and a fleet of Python workers. It also names the graded artifacts: the
+- The brief **fixes the component list**: NodeJS/Express/TS API, a DB, a queue ("any
+  kind"), and a fleet of Python workers. It also names the deliverables: the
   distribution algorithm, the split of F > 5 jobs into queue items, completion
   detection, and multi-job concurrency.
-- The prompt's constraints are pedagogical: K = 5 fan-in, heterogeneous worker speeds,
+- The brief's constraints are pedagogical: K = 5 fan-in, heterogeneous worker speeds,
   "design your worker orchestration algorithm". The deliverable *is* the scheduler.
 - Our design's correctness spine is one transaction (D3/DM-004): {consume ≤5 partials
   + enqueue their reducer} atomically, serialised per job by an advisory lock.
@@ -51,13 +50,13 @@ equivalent; the API submits applications to a cluster.
   vanished.
 
 **Cons:**
-- Forfeits the deliverable: the graded artifact (orchestration algorithm, queue-item
+- Forfeits the deliverable: the deliverable the brief names (orchestration algorithm, queue-item
   design, completion detection) disappears inside Spark's DAG scheduler — the
   submission becomes "I configured Spark".
 - Violates the fixed component list (no Express/TS API in front of a queue of our
   choosing; workers are executors, not "Python workers waiting on a queue").
 - Spark's driver/executor model assumes homogeneous, co-scheduled executors; the
-  prompt explicitly withdraws that assumption (heterogeneous speeds is a graded
+  prompt explicitly withdraws that assumption (heterogeneous speeds is a evaluated
   scenario, handled by pull-based claiming in our design, DM-002).
 - Cluster operational weight (driver HA, shuffle service, YARN/K8s) dwarfs the system
   it replaces at this scale.
@@ -82,7 +81,7 @@ child workflows; Temporal guarantees durable state and at-least-once activities.
   reducer creation — lives in **our** DB, outside Temporal's transaction boundary; we
   would still need the Postgres transaction, now coordinated with a second stateful
   system (the dual-write DM-004 exists to kill).
-- The queue stops being "any kind" — it becomes Temporal's, hiding the graded
+- The queue stops being "any kind" — it becomes Temporal's, hiding the evaluated
   queue-item design.
 
 ### Adopt a task framework end-to-end (Celery / RQ / Ray)
@@ -105,17 +104,17 @@ Celery chords for fan-in, Redis/RabbitMQ broker, Python everywhere.
 The design of this doc set: DM-001…DM-010.
 
 **Pros:**
-- The graded artifacts are all visible and ours: split policy, eager tree, completion
+- The deliverables the brief names are all visible and ours: split policy, eager tree, completion
   proof, fairness — each a decision record, not a config flag.
 - One transactional substrate: the consume-and-enqueue invariant is a single Postgres
   transaction — no engine offers this across its boundary.
-- Component list matches the prompt exactly.
+- Component list matches the brief exactly.
 - Total moving parts: 5 containers; smaller than any engine's control plane.
 
 **Cons:**
 - We own retries, leases, fencing, fairness — ~every failure mode DM-006 enumerates
-  is our code, and v1 of this very doc set shipped four blockers in that layer
-  (CHANGELOG) that Spark/Temporal users would never have met.
+  is our code — and the lease/pairing layer is exactly where the subtle bugs live
+  (fencing, token rotation, pairing races); engine users never meet them.
 - No speculative execution, locality, or shuffle optimizations unless we build them
   (DM-002 defers speculation deliberately).
 - At true production scale/generality (arbitrary DAGs, many job types), this converges
@@ -125,21 +124,21 @@ The design of this doc set: DM-001…DM-010.
 
 ## Chosen: Build on primitives, and say why out loud
 
-**The decision.** Build the system from the prompt's own primitives. State in the HLD
+**The decision.** Build the system from the brief's own primitives. State in the HLD
 (§1) that Spark `treeAggregate` is the production answer *absent these constraints* —
 the rejection is context-bound, not ideological.
 
-**Positive case.** The prompt grades the orchestration algorithm itself; the fixed
-component list is the interviewer drawing the system's boundary for us. Within that
+**Positive case.** The brief evaluates the orchestration algorithm itself; the fixed
+component list is the brief drawing the system's boundary for us. Within that
 boundary, the strongest possible design is one where the correctness spine —
 consume-partials + enqueue-reducer, atomically, per job — lives in a single
 transactional store, which is precisely the thing no engine exposes across its API.
 Everything distinctive in this submission (the eager 5-ary tree, the `count == F`
 proof, fairness as an ORDER BY) exists *because* we own that transaction.
 
-**Why each rejection.** *Spark/Dask*: right tool, wrong exam — it erases the graded
-artifact, breaks the fixed component list, and its executor model assumes away the
-heterogeneity the prompt makes central. *Temporal*: dynamic fan-out at 27k
+**Why each rejection.** *Spark/Dask*: right tool, wrong constraints — it erases the deliverable
+itself, breaks the fixed component list, and its executor model assumes away the
+heterogeneity the brief makes central. *Temporal*: dynamic fan-out at 27k
 activities/job fights its history model, and the exactly-once partial-consumption
 invariant would still need our Postgres transaction — two stateful systems where one
 suffices. *Celery/Ray*: inherits DM-003's counter-vs-proof analysis and DM-008's
@@ -159,6 +158,6 @@ adoption drops below the cost of owning DM-006's failure matrix.
 
 | Checkpoint | Target | How measured |
 |-----------|--------|--------------|
-| The framing question lands pre-empted | "Why not Spark?" is answered in the doc a reviewer reads first (HLD §1) | present in 02-hld.md |
-| Owned-complexity honesty | The cost of building (four v1 blockers in the lease/pairing layer) is cited, not hidden | CHANGELOG referenced in this ITD |
+| The framing question lands pre-empted | "Why not Spark?" is answered in the HLD opening section | present in 02-hld.md |
+| Owned-complexity honesty | The cost of building — owning fencing, token rotation, and pairing races — is stated, not hidden | CHANGELOG referenced in this ITD |
 | Boundary discipline | No second stateful coordination system appears in the design | component inventory in HLD §2 |

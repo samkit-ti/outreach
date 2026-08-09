@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-002 (eager pairing, dynamic task DAG), DM-006 (state machine, leases, reaper), DM-007 (multi-job fairness), DM-008 (worker pool, desired vs actual W), `../02-hld.md`, `../CONTEXT-BRIEF.md`
 
 ---
@@ -11,7 +10,7 @@
 ## Problem Statement
 
 The bonus asks for "a UI with updating logs: workers free/busy, jobs completed, jobs queued, and
-anything else judged relevant". Two of the graded criteria — *how the system decides a job is
+anything else judged relevant". Two of the brief's critical aspects — *how the system decides a job is
 finished* and *support submitting multiple jobs while jobs are ongoing* — are claims about behaviour
 that are only believable if they are visible while running. A max **job** (F=100k, C=1M) is ≈20,000
 leaf `map` **tasks** plus ≈5,000 `reduce` tasks over ~7 levels plus ≈2,000 `generate` tasks
@@ -35,7 +34,7 @@ event log and no UI.
 - **The DB already holds the truth.** The `tasks` table *is* the queue (D5), and every transition is
   transactional (D7). Anything the UI shows must be derived from committed DB state, never from a
   worker's in-memory belief — otherwise the UI and the completion logic can disagree, and completion
-  is a graded criterion.
+  is a critical aspect in the brief.
 - **Workers report liveness by heartbeat** into the `workers` table (D10/DM-008), 10 s interval,
   30 s lease, 5 s reaper sweep (worst-case detection 35 s, DM-006). `free`/`busy` is `current_task IS NULL` among rows with
   `last_heartbeat > now() − 30 s`. **W** has a *desired* value (`system_config.desired_workers`)
@@ -67,7 +66,7 @@ The UI calls `GET /jobs` and `GET /system/stats` on a `setInterval` of 1–2 s a
   queries/sec of pure overhead,
   most returning unchanged data.
 - Discrete snapshots lose the *sequence*. "Job B started while Job A was mid-flight" is exactly the
-  multi-job claim being graded, and it reads as two unrelated frames rather than an ordered log.
+  multi-job claim being evaluated, and it reads as two unrelated frames rather than an ordered log.
 
 ### Server-Sent Events from an append-only event log **[CHOSEN]**
 
@@ -84,7 +83,7 @@ browser's built-in `EventSource` consumes them and auto-reconnects.
 - One-directional, matching the actual flow: everything client→server is already a REST call
   (submit job, set W). Nothing is being given up.
 - The event log is independently valuable: an append-only, ordered, replayable audit of *why* the
-  system concluded a job was finished — the graded question — usable after the demo, not just during.
+  system concluded a job was finished — the question the brief asks — usable after the demo, not just during.
 - Server-side cost decouples from client count: one 1 Hz aggregate query feeds N subscribers.
 
 **Cons:**
@@ -129,7 +128,7 @@ Instrument the API and workers with a Prometheus client, scrape them, build Graf
 
 **Cons:**
 - Two more containers plus dashboard provisioning, for a deliverable whose stated bonus is a UI with
-  updating logs — the effort lands outside what is graded.
+  updating logs — the effort lands outside what is evaluated.
 - Wrong granularity for the ask. Scrape intervals are 15–30 s and gauges are sampled, so
   "worker 3 just claimed task 8812" is structurally unavailable; Prometheus deliberately does not do
   per-event streams.
@@ -352,6 +351,6 @@ genuine client→server push requirement and the point at which WebSockets earns
 | Reconnect gap recovery | kill the API mid-job; on reconnect, 0 events missed | compare client-received ids with `SELECT max(id)` — contiguous |
 | Fan-out cost | 10 open tabs ⇒ ≤1 stats query/sec total | `pg_stat_statements` call count for the snapshot query |
 | Multi-job visibility | F=3 job submitted during an F=1000 job: both progress bars advance within 5 s | screen recording + per-job frames |
-| Bonus coverage | workers free/busy, jobs completed, jobs queued all present and updating | visual check against the prompt's bonus wording |
+| Bonus coverage | workers free/busy, jobs completed, jobs queued all present and updating | visual check against the brief's bonus wording |
 | Stream stability | 10 min idle stream behind the ALB stays open | keepalive comments logged, no reconnect events |
 | Event write cost | `events` insert adds < 5% to task-commit transaction latency | benchmark commit path with the insert toggled off |

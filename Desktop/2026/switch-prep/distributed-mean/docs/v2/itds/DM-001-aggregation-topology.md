@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-002 (adaptive fan-in / stragglers), DM-004 (queue), DM-005 (storage & formats), DM-006 (idempotency), DM-010 (numerical correctness), ../02-hld.md, ../CONTEXT-BRIEF.md
 **Simulation:** [Design Lab — Topology tab](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — race the eager tree against the barrier, fixed tree, and central accumulator.
 
@@ -33,13 +32,13 @@ Constraints that bind this decision:
   observation is what makes aggregation *recursive*: combining 20,000 partials 5-at-a-time
   needs ⌈log₅ 20,000⌉ = **7 levels** and **≈5,000 reduce tasks**. Total: **≈25k compute tasks
   + ≈2k `generate` tasks per max job** (D9 — input generation is itself distributed).
-- **Workers process files at different speeds** (given in the prompt). Any structure with a
+- **Workers process files at different speeds** (given in the brief). Any structure with a
   synchronisation point converts the slowest worker into the job's clock.
-- **Multiple jobs run concurrently** (graded aspect #4), so no per-job singleton process may
+- **Multiple jobs run concurrently** (critical aspect #4 in the brief), so no per-job singleton process may
   hold job state in memory.
 - **The queue cannot carry data.** An 8 MB partial does not fit an SQS message (256 KB cap),
   so the queue carries references and bytes live in the object store (D5, D6 → DM-004, DM-005).
-- **"How the system decides a job is finished" is explicitly graded** (aspect #3). A topology
+- **"How the system decides a job is finished" is named a critical aspect in the brief** (aspect #3). A topology
   that makes completion a property of the *data* is worth more than one that makes it a
   property of a bookkeeping counter.
 - F is user-chosen and **not** guaranteed to be a multiple of 5. F = 12 is a legal job.
@@ -95,7 +94,7 @@ the resulting 20,000 partials.
 
 **Cons:**
 - The barrier makes the **slowest single map task** the start gate for *all* reduce work. With
-  heterogeneous workers that is precisely the failure the prompt asks us to design around.
+  heterogeneous workers that is precisely the failure the brief asks us to design around.
 - Workers idle at the boundary — the fast ones have nothing to claim while the tail finishes.
 - Peak intermediate storage is the full **160 GB** of level-0 partials, all resident
   simultaneously; eager reduction never materialises that set.
@@ -132,7 +131,7 @@ One process holds a single C-length float64 accumulator (`sum_vector`) plus a co
   one vector and streams). But "≤5 files at a time" is a stand-in for "you may not assume one
   node can see the whole job", and this design re-introduces the single-node bottleneck the
   constraint exists to teach you to design around. This is a judgement call about what is
-  being graded, and I would state it as such in the interview rather than pretend the
+  being evaluated, and it is stated as such here rather than pretending the
   engineering alone kills it.
 
 ### Column-range sharding of the C dimension
@@ -199,7 +198,7 @@ when a single partial with `count == F` remains. At F = 100k, C = 1M this is **2
 
 1. **Sums are a monoid; means are not.** `(sum, count)` pairs combine associatively and
    commutatively, which is what lets *any* free worker combine *any* two partials the instant
-   both exist. That algebraic freedom is the scheduling freedom the prompt's "workers process
+   both exist. That algebraic freedom is the scheduling freedom the brief's "workers process
    files at different speeds" requirement needs — the topology and the straggler answer are
    the same design, not two.
 
@@ -216,7 +215,7 @@ when a single partial with `count == F` remains. At F = 100k, C = 1M this is **2
    too. Reduction is therefore recursive with ⌈log₅⌉ depth: 7 levels over 20,000 partials, and
    the critical path grows logarithmically (a 5× larger F cap costs one more level). The
    `count` field then doubles as the completion test: *one partial exists and its count == F*.
-   That answers graded aspect #3 from the data rather than from a task ledger, which matters
+   That answers critical aspect #3 in the brief from the data rather than from a task ledger, which matters
    because at-least-once delivery (D7) makes "all 20,000 map rows are done" a claim about
    bookkeeping while `count == F` is a claim about the numbers themselves. `count` is an
    integer, so the check is exact — no float comparison (DM-010). To be honest about it, the

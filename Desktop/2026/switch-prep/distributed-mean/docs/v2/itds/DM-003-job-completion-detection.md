@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-001 (aggregation topology), DM-002 (work distribution & stragglers), DM-004 (queue substrate), DM-006 (state machine & failure), DM-007 (multi-job fairness), DM-009 (observability), `../02-hld.md`, `../CONTEXT-BRIEF.md`
 **Simulation:** [Design Lab — Topology tab (event log)](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — the log prints the count==F proof firing at each lane's completion.
 
@@ -11,7 +10,7 @@
 
 ## Problem Statement
 
-"How the system decides a job is finished" is graded explicitly (critical aspect #3),
+"How the system decides a job is finished" is critical aspect #3 in the brief,
 and it is hard here for one specific reason: **the task count is not known in advance.**
 A max job (F = 100k, C = 1M) produces ≈2k `generate` tasks and ≈25k compute tasks, but
 the ≈5,000 `reduce` tasks are created *dynamically* by eager pairing (D3) — how many
@@ -130,7 +129,7 @@ A dedicated process periodically (say every 500 ms) queries each active job for
 
 **Cons:**
 - Adds up to one poll interval of latency to every job, on top of `finalize` execution.
-  With a UI showing live progress, that pause at 100% is exactly what a reviewer notices.
+  With a UI showing live progress, that pause at 100% is exactly what a user notices.
 - Introduces a component whose only role is watching, which itself needs liveness,
   leader election (two coordinators must not both enqueue `finalize`), and monitoring.
 - Polling cost scales with active jobs × interval whether or not anything changed.
@@ -169,7 +168,7 @@ Treat "the queue has no messages" as completion.
 - Fine for a single-job batch system, which is why it shows up in practice.
 
 **Cons:**
-- **Wrong under multi-job concurrency**, which is a graded requirement: the queue being
+- **Wrong under multi-job concurrency**, which is an explicit requirement in the brief: the queue being
   empty says nothing about *which* job finished, and it is essentially never empty while
   any job runs. Per-job depth filtering just re-derives "no pending tasks for this job",
   i.e. half of the chosen condition, with none of the proof.
@@ -272,7 +271,7 @@ proportional to its interval and a component whose only job is to notice somethi
 committing transaction already knew, plus leader election to keep two of them from
 double-finalizing; it is retained only as an optional low-frequency **backstop** (see
 below), never as the primary path. *Queue-empty detection* was rejected because it is
-wrong under the graded multi-job requirement and racy even single-job, since depth zero
+wrong under the brief's multi-job requirement and racy even single-job, since depth zero
 does not mean claimed-and-uncommitted work is absent.
 
 **Retained backstop (not the primary path).** The reaper (5 s interval, enforcing the 30 s

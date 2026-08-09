@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-001, DM-002, DM-003, DM-004, DM-005, DM-007, DM-010, `../02-hld.md`, `../CONTEXT-BRIEF.md`
 **Simulation:** [Design Lab — Scheduling tab — 'Kill a worker'](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — watch the lease expire and the task requeue.
 
@@ -231,9 +230,9 @@ recorded cause.
    and the reaper, on requeue, sets `lease_token = NULL` alongside `status='pending'` and
    `worker_id = NULL`. Both halves matter. Without the `status='claimed'` predicate a
    heartbeat could resurrect a lease on a task the reaper had already returned to `pending`,
-   re-hiding it from the queue; and without the reaper *rotating* the token — v1 left the old
-   token in place — a stale token would still be a *matching* token, so the fence would be
-   checking a value that never changes. Clearing it means a token is valid for exactly one
+   re-hiding it from the queue; and without the reaper *rotating* the token on requeue,
+   a stale token would still be a *matching* token, so the fence would be checking a
+   value that never changes. Clearing it means a token is valid for exactly one
    claim generation: a zombie's heartbeat and its eventual commit both match 0 rows, and
    because the next claim mints a fresh `gen_random_uuid()`, no stale token can ever match a
    future state of that row. Note what we did *not* need: a monotonic fencing token at the

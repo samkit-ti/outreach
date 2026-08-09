@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-001, DM-002, DM-003, DM-006, DM-007, ../02-hld.md, ../CONTEXT-BRIEF.md
 
 ---
@@ -24,7 +23,7 @@ and put it behind an interface so the breaking point is a config change rather t
 
 ## Context
 
-- The prompt fixes the components: **API in Node/Express/TS, workers in Python, a DB, and "Queue: any kind
+- The brief fixes the components: **API in Node/Express/TS, workers in Python, a DB, and "Queue: any kind
   (SQS, something local, anything)."** So the queue is genuinely open — but it is **cross-language by
   construction**: the producer is TypeScript and the consumer is Python. Any queue whose semantics live in a
   single-language library is disqualified before the trade-off table starts. That removes **BullMQ /

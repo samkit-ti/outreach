@@ -1,6 +1,6 @@
 # Distributed Mean — High-Level Design (v2)
 
-**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2 — hardened after adversarial review (see `CHANGELOG.md`)
+**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2
 **Reads with:** `01-requirements-and-assumptions.md` · decisions justified in `itds/DM-001…DM-011`
 
 ---
@@ -24,7 +24,7 @@ Everything else follows from three commitments:
    while slow workers are still mapping, and no branch waits on a specific child
    (DM-002/DM-003).
 
-One sentence for the interview: *"I turn the job into a bag of idempotent tasks whose
+In one sentence: *"I turn the job into a bag of idempotent tasks whose
 partial results are closed under a 5-ary merge, let heterogeneous workers pull from
 the bag, and completion is the theorem that a partial covering all F files is the
 answer."*
@@ -33,10 +33,10 @@ answer."*
 
 Index-wise mean over F files is six lines of Spark (`treeAggregate`) or Dask, and
 dynamic fan-out with durable children is Temporal's canonical demo. We build anyway,
-for three reasons worth saying out loud: (1) the prompt fixes the components — Node
-API, DB, queue, Python workers — and grades the *distribution algorithm itself*;
+for three reasons worth saying out loud: (1) the brief fixes the components — Node
+API, DB, queue, Python workers — and evaluates the *distribution algorithm itself*;
 hiding it inside someone else's scheduler forfeits the deliverable. (2) Spark's
-driver/shuffle model assumes homogeneous, co-scheduled executors — the prompt
+driver/shuffle model assumes homogeneous, co-scheduled executors — the brief
 explicitly withdraws that assumption — and Temporal would carry ~27k activity events
 per job with the partial-consumption invariant living *outside* its transaction
 boundary. (3) Nothing off-the-shelf can join DM-004's single transaction that consumes
@@ -101,7 +101,7 @@ Four task types, one queue, uniform claiming (full schemas in LLD):
 
 There is **no pre-built tree**. When any worker commits a partial, in the *same
 transaction* — serialised per job by an advisory lock, so concurrent committers can
-never both undercount the partial set and both decline (v2 hardening, LLD §4) — it
+never both undercount the partial set and both decline (LLD §4) — it
 runs the pairing step:
 
 ```
@@ -182,7 +182,7 @@ worker's lease expires, the reaper flips the task back to `pending`, and because
 task writes to a **deterministic object key**, the retry overwrites harmlessly.
 At-least-once delivery + idempotent effects ≡ effectively-once outcome.
 
-## 5. How each graded "critical aspect" is answered
+## 5. How each evaluated "critical aspect" is answered
 
 | Prompt's criterion | Design answer |
 |---|---|
@@ -245,7 +245,7 @@ flowchart LR
 5. **Multi-tenant / quotas**: fairness ordering generalizes to weighted fair queuing
    (DM-007 evolution).
 
-## 9. Security & ops notes (v1 scope)
+## 9. Security & ops notes (current scope)
 
 No authn/authz (A-4) — which makes `PATCH /system/workers` an unauthenticated
 fleet-wide control in v1/v2; acceptable for the take-home, named here so it's a

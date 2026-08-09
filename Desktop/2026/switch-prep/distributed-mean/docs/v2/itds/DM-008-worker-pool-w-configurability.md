@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-002 (pull-based claiming, eager pairing), DM-004 (Postgres queue), DM-006 (leases, at-least-once, reaper), DM-007 (multi-job fairness), DM-009 (observability/UI), `../02-hld.md`, `../CONTEXT-BRIEF.md`
 
 ---
@@ -14,7 +13,7 @@ The fleet has to execute ≈25k compute **tasks** plus ≈2k `generate` tasks fo
 (F=100k, C=1M), where each leaf `map` task consumes up to **K**=5 inputs of 8 MB each and emits one
 8 MB **partial**. Two things must be decided: (1) what a **worker** *is* as an OS-level artifact —
 process, thread in a pool, or coroutine on an event loop — and (2) how **W**, the system-level worker
-count, is set and changed. The prompt permits W to be a constant; the bonus asks for it to be
+count, is set and changed. The brief permits W to be a constant; the bonus asks for it to be
 configurable via the API. Target: `PATCH /system/workers {desired}` takes effect with actual converging on
 desired within 15 s locally (≤90 s on ECS Fargate), a scale-down loses **zero** in-flight task work,
 and a `kill -9` of one worker requeues exactly one task. Today there is no worker process at all —
@@ -31,7 +30,7 @@ this ITD defines it.
   per-worker RSS at C=1M lands around 150 MB including the CPython+numpy baseline.
   Stated canonically (A-8): **K=5 is a logical fan-in limit on how many files' worth of data a task
   may have in flight; we honour the stricter byte reading too by streaming.** `generate` is exempt
-  from K because it writes files sequentially and aggregates nothing; if a reviewer reads K as
+  from K because it writes files sequentially and aggregates nothing; under the stricter reading of K as
   covering writes, `GEN_BATCH` drops from 50 to 5 and the generate-task count rises 10× (≈2,000 →
   ≈20,000 for the max job), changing nothing structurally — this knob exists precisely so the
   disagreement is a config value, not a redesign.
@@ -66,7 +65,7 @@ Two coupled axes: **how W is controlled**, and **what a worker is internally**.
 re-running compose. No API surface, no supervisor, no `desired_workers` row.
 
 **Pros:**
-- Zero moving parts; explicitly permitted by the prompt ("free to keep them constant").
+- Zero moving parts; explicitly permitted by the brief ("free to keep them constant").
 - No docker socket mount, no IAM policy, no reconciliation bug class at all.
 - Removes an entire failure mode: desired and actual can never disagree, so the UI has one number.
 
@@ -151,7 +150,7 @@ thread inside the process extends the lease every 10 s while the main thread doe
   (≤35 s of latency: 30 s lease + 5 s reaper sweep, DM-006), not N.
 - 1:1 with the W abstraction: "scale to W" is one number on one axis. `docker compose --scale` and
   ECS desired-count both speak this natively.
-- K=5 accounting stays trivially per-worker, matching how the prompt states the constraint.
+- K=5 accounting stays trivially per-worker, matching how the brief states the constraint.
 
 **Cons:**
 - ~150 MB RSS per worker of which ~100 MB is interpreter + numpy baseline, duplicated W times. At
@@ -180,7 +179,7 @@ One container, T worker threads each claiming and executing tasks independently.
   asked for.
 - The K=5 RAM story blurs: the honest reading is T×5 logical inputs resident in one address space.
   Because we stream, the real figure is T×~50 MB rather than T×40 MB of inputs, but the simulated
-  constraint stops mapping cleanly onto the unit the prompt describes.
+  constraint stops mapping cleanly onto the unit the brief describes.
 
 ### Axis 2 — Single process, asyncio event loop
 
@@ -214,9 +213,9 @@ Use an off-the-shelf Python task framework for the worker loop, retries, and con
   exactly the dual-write bug D5 exists to eliminate — eager pairing (D3) *requires* claim-and-enqueue
   in one transaction with the partial commit, and no external broker can join that transaction.
 - Its own task-result backend competes with the `tasks` table for "single source of truth", so job
-  completion (a graded criterion) would be inferred from two stores.
+  completion (a critical aspect in the brief) would be inferred from two stores.
 - The distribution algorithm — claim ordering, adaptive fan-in, fairness (D3/D8) — is the thing being
-  graded. Hiding it inside another scheduler's prefetch logic forfeits the deliverable.
+  evaluated. Hiding it inside another scheduler's prefetch logic forfeits the deliverable.
 
 ---
 
@@ -257,18 +256,18 @@ demo, worker heterogeneity is injected by env var (`WORKER_SLOWDOWN_FACTOR`) rat
 Stale rows are marked `gone` by the same reaper that expires leases (DM-006) — one sweeper, two
 responsibilities, no extra process.
 
-**Why each rejection.** *Fixed W* is legitimate and the prompt allows it, but it costs the bonus and
+**Why each rejection.** *Fixed W* is legitimate and the brief allows it, but it costs the bonus and
 the W=0 → W=4 demo beat, and leaves no `desired_workers` for later elasticity to build on. *Worker
 self-management* cannot bootstrap from W=0 and turns scale-down into an election over a shared
 counter — a worse supervisor, embedded in the data plane, with the docker socket in every replica.
 *Queue-depth autoscaling* is the right production answer and is documented as the evolution, but it
 inverts the bonus (W becomes an output, not a user input) and would hide the straggler behaviour that
-DM-002 is graded on. *Thread pool* is the strongest Axis-2 contender and the GIL argument against it
+DM-002 is evaluated on. *Thread pool* is the strongest Axis-2 contender and the GIL argument against it
 is genuinely weak given numpy releases it; it loses on blast radius (T leases per fault) and on
 turning W into two knobs. *asyncio* wins on the I/O overlap but blocks the loop on the numpy add and
 ends up delegating to threads anyway — and we keep its actual benefit by prefetching the next input
 inside a task, which needs no change to W semantics. *Celery/Ray* cannot join D3's
-claim-and-enqueue transaction and would hide the graded algorithm inside someone else's scheduler.
+claim-and-enqueue transaction and would hide the algorithm the brief asks for inside someone else's scheduler.
 
 **Failure condition.** Revisit when any of: (a) W needs to respond to load rather than to a human —
 i.e. we start owning a latency or cost SLO instead of demonstrating behaviour — at which point

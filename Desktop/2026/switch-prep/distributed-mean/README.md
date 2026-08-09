@@ -72,7 +72,9 @@ on export), `research/reading-list.md`, `simulator.html` (source of the publishe
 artifact), `CHANGELOG.md`.
 
 > **Note for export:** if this tree is submitted as the take-home, drop
-> `CONTEXT-BRIEF.md`, `itds/TEMPLATE.md`, and this note; they are working scaffolding.
+> `CONTEXT-BRIEF.md`, `itds/TEMPLATE.md`, `CHANGELOG.md`, the `**Simulation:**` link
+> lines in DM-001/002/003/006/007, and this note; they are working scaffolding and
+> private tool links.
 
 ## Planned (next phase — tracked in beads: `outreach-zjth`)
 

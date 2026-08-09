@@ -1,10 +1,10 @@
 # v2 Context Brief — Locked Decisions & Canonical Vocabulary
 
-> Single source of truth for all v1 documents (HLD, LLD, ITDs). Every ITD must be
+> Single source of truth for these documents (HLD, LLD, ITDs). Every ITD must be
 > consistent with this brief. If an ITD author believes a locked decision is wrong,
 > flag it in the ITD's "failure condition" section — do not silently diverge.
 
-**Version:** v2 — hardened after adversarial review (see `CHANGELOG.md`) · **Date:** 2026-08-10 · **Author:** Samkit Shah
+**Version:** v2 · **Date:** 2026-08-10 · **Author:** Samkit Shah
 
 ---
 
@@ -30,7 +30,7 @@
 - ≈25k compute tasks + ≈2k `generate` tasks per max job.
 - A partial (8 MB) cannot ride in a queue message (SQS cap 256 KB) → queue carries references; bytes live in object store.
 
-## Locked v1 decisions (D1–D12)
+## Locked decisions (D1–D12)
 
 **D1 — Aggregation topology: recursive eager 5-ary reduction through the queue.**
 Workers emit partials carrying `(sum_vector, count)`. Reduce tasks combine 2–5 partials
@@ -58,7 +58,7 @@ slow child stall a branch). → ITD DM-002
 
 **D4 — Pull-based work distribution.** Workers claim tasks when free; nothing is ever
 pushed/assigned to a specific worker. Fast workers naturally do more tasks — this plus
-D3 is the primary straggler answer. Optional (documented, not in v1 demo): speculative
+D3 is the primary straggler answer. Optional (documented, not in the demo): speculative
 re-execution of the last in-flight tasks of a job, MapReduce/LATE-style. → ITD DM-002
 
 **D5 — Queue = Postgres 16 `FOR UPDATE SKIP LOCKED`.** The `tasks` table *is* the
@@ -125,10 +125,10 @@ unnecessary at these bounds (documented). → ITD DM-010
 
 ## Consistency rules for ITD authors
 
-1. Follow the template in `itds/TEMPLATE.md` exactly. Status: **DECIDED**. Date: 2026-08-10. Author: Samkit Shah. Add `**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)` under Status.
+1. Follow the template in `itds/TEMPLATE.md` exactly. Status: **DECIDED**. Date: 2026-08-10. Author: Samkit Shah.
 1b. **Column and endpoint names are quoted from `03-lld.md` §1/§6 — never re-invented; the LLD DDL is the single source of truth.** Canonically: `partials.produced_by` / `partials.consumed_by` (never `task_id`, `consumed_by_task_id`, `consumed_at`); `tasks.status` (never `state`); job states `pending / running / finalizing / completed / failed`; endpoints `PATCH /system/workers` and `GET /events` (SSE); event `job.submitted` (never `job.created`); priority `finalize=0 < reduce=1 < map=2 < generate=3` so the claim query sorts `priority ASC`. Constants: lease 30 s, heartbeat 10 s, reaper 5 s, worst-case detection 35 s.
 2. Use the vocabulary above verbatim (job/task/partial/K/W/F/C).
 3. Quote the envelope numbers from this brief — do not re-derive different ones.
 4. Alternatives must be real (a reasonable person could choose them) with honest cons; the chosen section must make a positive case AND state a failure condition (what would make us revisit).
 5. Cross-reference related ITDs by id (DM-001…DM-010) and the HLD (`../02-hld.md`).
-6. This is interview prep: optimize for *defensibility in a follow-up discussion* — every claim should survive a "why not X?" probe.
+6. Every claim should survive a "why not X?" probe — write nothing that cannot be defended in a follow-up discussion.

@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-002, DM-003, DM-004, DM-005, DM-006, `../02-hld.md`, `../CONTEXT-BRIEF.md`
 **Simulation:** [Design Lab — Fairness tab](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — FIFO convoy vs least-in-flight with a big and a small job.
 
@@ -11,8 +10,8 @@
 
 ## Problem Statement
 
-The prompt lists "support submitting multiple jobs even if there are ongoing jobs" as one of
-four explicitly graded aspects, and the envelope makes the failure mode concrete: a max job
+The brief lists "support submitting multiple jobs even if there are ongoing jobs" as one of
+four named a critical aspect in the brief aspects, and the envelope makes the failure mode concrete: a max job
 (F=100k, C=1M) enqueues ≈25k compute tasks plus ≈2k `generate` tasks, while a small job
 (F=3) enqueues 1 `generate` task, 1 `map` task and 1 `finalize` task. Under any
 arrival-ordered discipline the small job's three tasks sit behind ~27,000 others. At W=10
@@ -28,7 +27,7 @@ job of any size can be starved indefinitely.
 
 What the decision has to fit inside:
 
-- **W is system-level, not per-job.** The prompt states this explicitly: workers are a fleet
+- **W is system-level, not per-job.** The brief states this explicitly: workers are a fleet
   shared across all jobs, not partitioned per job. So fairness is a *scheduling* question
   about which task the next free worker takes — there is no allocation knob to turn.
 - **D4 / pull-based distribution (DM-002, DM-003).** Nothing is pushed to a worker; a free
@@ -72,7 +71,7 @@ One queue for all jobs; the next free worker takes the globally oldest `pending`
 **Cons:**
 - Convoy starvation, quantified: 27,000 tasks ahead × ~5 s ÷ 10 workers ≈ 3.75 h of pure
   queueing for a 3-task job whose intrinsic work is ~15 s. A ~900× slowdown on the small
-  job, which is a functional failure of a graded requirement, not a tuning issue.
+  job, which is a functional failure of an explicit requirement in the brief, not a tuning issue.
 - The pathology worsens with fleet size in the wrong direction: adding workers shortens the
   convoy but never reorders it, so no amount of capacity fixes head-of-line blocking.
 - Interacts badly with D3: a job's `finalize` task is created last and is therefore the
@@ -157,7 +156,7 @@ Give each job a weight or priority class; allocate worker slots proportionally.
   with.
 - Deficit accounting means persisting per-job service counters and deciding their decay —
   meaningful state for a benefit no current requirement asks for.
-- Documented as the evolution path, not v1 scope.
+- Documented as the evolution path, not current scope.
 
 ### Admission control / concurrency cap per job
 
@@ -170,7 +169,7 @@ Let jobs run FIFO but cap how many tasks of one job may be in flight (e.g. ≤ �
 
 **Cons:**
 - Wastes the fleet in the common single-job case: with one max job and W=10, a cap of 5
-  idles half the fleet, directly violating the prompt's "workers spend as little time as
+  idles half the fleet, directly violating the brief's "workers spend as little time as
   possible idling".
 - The correct cap depends on the number of active jobs, which is dynamic — so the cap has to
   be recomputed continuously, at which point it *is* the in-flight-count ordering, only
@@ -302,11 +301,11 @@ last by construction. *Per-job queues* were rejected because dynamic queue lifec
 either a shared rotation cursor (new coordination point) or wasteful empty probing is more
 moving parts than an `ORDER BY`, and moving the queue out of Postgres would break D3's
 atomic claim-and-enqueue into a dual write. *Weighted fair queuing* was rejected as
-premature: v1 has no tenant, billing, or auth model to source weights from, so it would be
+premature: there is no tenant, billing, or auth model to source weights from, so it would be
 client-declared priority with the predictable inflation, plus its own anti-starvation
 machinery — it is the documented evolution, and it slots into the same `ORDER BY` when
 product semantics exist. *Per-job concurrency caps* were rejected because they idle the fleet
-in the single-job case (violating the prompt's anti-idling requirement) and, once made
+in the single-job case (violating the brief's anti-idling requirement) and, once made
 adaptive, degenerate into the chosen ordering with a worse failure mode.
 
 **Failure condition.** Revisit if: (a) the claim query becomes the throughput bottleneck —

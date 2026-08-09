@@ -1,7 +1,7 @@
 # Research & Prior Art — Reading List (v1)
 
 Grounding material for the trade-offs argued in the ITDs. Skim before the follow-up
-interview; each entry notes which decision it backs.
+discussion; each entry notes which decision it backs.
 
 ## Straggler mitigation (→ DM-002)
 

@@ -3,7 +3,6 @@
 **Date:** 2026-08-10
 **Author:** Samkit Shah
 **Status:** DECIDED
-**Revision:** v2 — hardened after adversarial review (see ../CHANGELOG.md)
 **Related:** DM-001 (aggregation topology), DM-004 (queue substrate), DM-006 (state machine & failure), DM-007 (multi-job fairness), DM-010 (numerics), `../02-hld.md`, `../CONTEXT-BRIEF.md`
 **Simulation:** [Design Lab — Scheduling tab](https://claude.ai/code/artifact/ee9896b4-7e99-4aeb-b378-33290d2acd41) — pull vs push under heterogeneous speeds; drain-mode off shows the tail deadlock.
 
@@ -13,7 +12,7 @@
 
 A max job (F = 100k, C = 1M) decomposes into ≈2k `generate` tasks and ≈25k compute
 tasks — ⌈F/5⌉ = 20,000 leaf `map` tasks plus ≈5,000 `reduce` tasks over ~7 levels —
-against a fleet of W workers that the prompt explicitly says "process files at
+against a fleet of W workers that the brief explicitly says "process files at
 different speeds". Two things must be decided: **how a task reaches a worker**, and
 **how many inputs a task consumes**. The target is that no worker sits idle while any
 eligible task exists for any job, and that the job's completion time tracks aggregate
@@ -39,7 +38,7 @@ the fleet idle for the final stretch of every job.
   means, so combination is associative *and* commutative. This is the structural fact
   that the whole decision leans on: there is no correctness reason to prefer one
   grouping of partials over another.
-- **Multi-job concurrency is graded** (critical aspect #4). Whatever distributes work
+- **Multi-job concurrency is evaluated** (critical aspect #4). Whatever distributes work
   must interleave a 25k-task job with a 3-task job without starving either — that
   ordering policy is D8 / DM-007 and is deliberately kept *inside* the claim query
   rather than in a separate placement component.
@@ -196,7 +195,7 @@ improvement in response time in heterogeneous/virtualised clusters.
 
 Workers pull; nothing is ever pushed to a named worker. Reduce tasks are created
 eagerly at fan-in 5 in steady state and greedily at fan-in 2–4 in drain mode. LATE-style
-speculation is documented as an evolution and is **not** in v1.
+speculation is documented as an evolution and is **not** in the current scope.
 
 **How pairing is serialised.** The eager-pairing step at the top of T2 takes a per-job
 advisory lock, `pg_advisory_xact_lock(hashtext(job_id::text))`, and then reads the job's
@@ -254,7 +253,7 @@ one real win, locality-aware reduce placement, is recoverable later as a claim-o
 hint without giving up pull. *Fixed reduction tree* was rejected because per-node
 all-children-complete eligibility is a barrier — the exact failure D1 rejects at the
 job level, reinstated ~5,000 times — and because it spends D2's commutativity on
-nothing; its reproducibility benefit is real but is not a v1 requirement. *LATE-style
+nothing; its reproducibility benefit is real but is not a stated requirement. *LATE-style
 speculation* was rejected as premature, not as wrong: leases already bound the crash
 case to the lease timeout, drain mode already removes fan-in stalls, and pull already
 caps a slow-but-alive worker's blast radius at one task, so speculation would buy tail

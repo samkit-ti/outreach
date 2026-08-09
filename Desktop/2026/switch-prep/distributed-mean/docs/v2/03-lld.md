@@ -1,13 +1,7 @@
 # Distributed Mean — Low-Level Design (v2)
 
-**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2 — hardened after adversarial review (see `CHANGELOG.md`)
+**Date:** 2026-08-10 · **Author:** Samkit Shah · **Status:** v2
 **Reads with:** `02-hld.md` (architecture & rationale) · ITDs for decisions
-
-> v2 blocker fixes: claim query now serves `finalizing` jobs (v1 could never finalize);
-> eager pairing serialised per job via advisory lock (closes a mutual-decline race that
-> stranded partials); heartbeat fenced by status+token and reaper rotates the token;
-> DM-007-consistent priority direction. Plus: result delivery decided (302 pre-signed),
-> admission control, API idempotency, absolute task deadline, READ COMMITTED stated.
 
 ---
 
@@ -122,9 +116,9 @@ candidate AS (
   SELECT t.id
   FROM tasks t
   JOIN jobs j ON j.id = t.job_id
-             AND j.status IN ('running','finalizing')  -- v2 FIX: 'running' alone made
-                                                       -- finalize tasks unclaimable — no
-                                                       -- job could ever complete
+             AND j.status IN ('running','finalizing')  -- 'finalizing' included: the
+                                                       -- finalize task itself must be
+                                                       -- claimable or no job completes
   LEFT JOIN inflight i ON i.job_id = t.job_id
   WHERE t.status = 'pending'
   ORDER BY
@@ -152,13 +146,13 @@ Notes:
   locked gets zero rows, not the next row; the worker retries once immediately before
   falling back to `IDLE_POLL_MS`. (Alternative if measured: `LIMIT ceil(W/4)` in the
   CTE, update the first survivor.)
-- The `inflight` CTE computes per-job counts once per claim (DM-007's own form) — the
-  v1 correlated-subquery-in-ORDER-BY form evaluated it per pending row (up to 20k rows)
-  and could not use `idx_tasks_claim`.
+- The `inflight` CTE computes per-job counts once per claim (DM-007's own form) — a
+  correlated-subquery-in-ORDER-BY form would evaluate it once per pending row (up to
+  20k rows) and could not use `idx_tasks_claim`.
 - Lease = 30 s, heartbeat extends every 10 s, reaper polls every 5 s → worst-case
   crash-detection latency 35 s. Short lease is safe *because* heartbeats extend it.
-  Heartbeat SQL is itself fenced (v2 FIX — token alone was insufficient because the
-  reaper didn't rotate it):
+  Heartbeat SQL is itself fenced — by token AND status, since a token the reaper
+  hasn't rotated would otherwise still match:
   `UPDATE tasks SET lease_expires_at = now() + interval '30 seconds'
    WHERE id=$t AND lease_token=$mine AND status='claimed'
      AND lease_expires_at < to_timestamp($claimed_at + TASK_DEADLINE_SECONDS)`
@@ -203,14 +197,14 @@ BEGIN;
       ON CONFLICT (produced_by) DO NOTHING RETURNING id;   -- idempotent metadata
     -- no row returned → a prior commit of this task already ran pairing → skip it
 
-    -- EAGER PAIRING (DM-003), serialised per job (v2 FIX):
+    -- EAGER PAIRING (DM-003), serialised per job:
     SELECT pg_advisory_xact_lock(hashtext($jobId::text));
-    -- v1 used SKIP LOCKED on partials here. Under READ COMMITTED two concurrent
-    -- T2s could then EACH undercount the partial set AND each see the other's task
-    -- as still 'claimed' — both decline to pair, and since pairing only runs on
-    -- partial commit, the job strands ≥2 partials forever (reachable at F=7, W=2).
-    -- The advisory lock serialises the section (milliseconds); the second pairer
-    -- sees the first's committed partial and its task row as 'done'.
+    -- Why a lock and not SKIP LOCKED on partials: under READ COMMITTED two
+    -- concurrent T2s could each undercount the partial set AND each see the other's
+    -- task as still 'claimed' — both decline to pair, and since pairing only runs
+    -- on partial commit, the job would strand its last partials forever (reachable
+    -- at F=7, W=2). The advisory lock serialises the section (milliseconds); the
+    -- second pairer sees the first's committed partial and its task row as 'done'.
 
     SELECT id, uri, count FROM partials
       WHERE job_id=$jobId AND consumed_by IS NULL
@@ -249,8 +243,8 @@ and each of those has its own T2 that re-evaluates pairing.
 ```
 UPDATE tasks SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
                worker_id = NULL, lease_expires_at = NULL,
-               lease_token = NULL          -- v2 FIX: rotate the fence on requeue so a
-                                           -- stale token can never match a future state
+               lease_token = NULL          -- rotate the fence on requeue so a stale
+                                           -- token can never match a future state
  WHERE status='claimed'
    AND (lease_expires_at < now()
         OR now() > claimed_at + TASK_DEADLINE_SECONDS);  -- absolute deadline: reclaims
@@ -331,7 +325,7 @@ Execution discipline that makes everything else true:
 
 | Method & path | Req | Resp | Notes |
 |---|---|---|---|
-| `POST /jobs` | `{f, c, inputUris?}` + `Idempotency-Key?` header | `202 {jobId}` \| `413` too large \| `429` too many active | T1. `inputUris[]` (length F) skips generation and seeds `map` directly — exists so the prompt's own F=2 example is a first-class test |
+| `POST /jobs` | `{f, c, inputUris?}` + `Idempotency-Key?` header | `202 {jobId}` \| `413` too large \| `429` too many active | T1. `inputUris[]` (length F) skips generation and seeds `map` directly — exists so the brief's own F=2 example is a first-class test |
 | `GET /jobs` | `?limit=50&cursor=` | `[{id,f,c,status,progress,…}]` | keyset pagination on `(created_at,id)` |
 | `GET /jobs/:id` | — | `{status, progress, counts:{pending,claimed,done}, error?}` | progress = coverage (below) |
 | `GET /jobs/:id/result` | — | `302` → 15-min pre-signed GET \| `?inline=1` streams \| `409` until `completed` | keeps the API off the data plane (DM-005 owns this decision) |
@@ -415,8 +409,8 @@ the demo must exercise the same concurrency the design argues about.
 2. **Unit:** eager-pairing under concurrent committers with the interleaving *pinned*:
    two explicit DB connections, a `pg_sleep` injected between one committer's partial
    INSERT and its pairing step, asserting the other blocks on the advisory lock and
-   then sees the full partial set (INV-1/INV-2 hold; the v1 mutual-decline race stays
-   dead).
+   then sees the full partial set (INV-1/INV-2 hold; the mutual-decline race is
+   unreachable).
 3. **Chaos demo:** `docker kill` a busy worker → lease expires → task re-claimed →
    job completes; result still exact (idempotent PUT).
 4. **Straggler demo:** 3 workers at SPEED_FACTOR 1/3/10; assert fast worker's task

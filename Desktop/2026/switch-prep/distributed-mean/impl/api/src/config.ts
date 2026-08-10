@@ -44,6 +44,8 @@ export const config = {
   s3Bucket: str('S3_BUCKET', 'distributed-mean'),
   s3Region: str('S3_REGION', 'us-east-1'),
   s3ForcePathStyle: bool('S3_FORCE_PATH_STYLE', true),
+  /** Host-reachable endpoint for pre-signed URLs (MinIO: localhost; AWS: same as s3Endpoint). */
+  s3PublicEndpoint: str('S3_PUBLIC_ENDPOINT', str('S3_ENDPOINT', 'http://minio:9000')),
 
   /**
    * LLD §8 / HLD §9: buckets/hosts a worker may READ inputs from. Checked here at

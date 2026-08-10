@@ -64,6 +64,7 @@ services:
     environment:
       <<: *shared-env
       PORT: "8080"
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
     ports:
       - "8080:8080"
     depends_on:

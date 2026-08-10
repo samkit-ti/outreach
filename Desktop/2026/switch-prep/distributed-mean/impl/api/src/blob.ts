@@ -48,8 +48,24 @@ export function parseS3Uri(uri: string): { bucket: string; key: string } | null 
 }
 
 /** A 15-minute pre-signed GET (DM-005). */
+/**
+ * Presigning uses the PUBLIC endpoint: the signature covers the host, so a URL
+ * signed against the compose-internal `http://minio:9000` would be unreachable
+ * (and unverifiable) from a browser on the host. S3_PUBLIC_ENDPOINT defaults to
+ * S3_ENDPOINT for real AWS, where the two are the same.
+ */
+const s3Public: S3Client =
+  config.s3PublicEndpoint === config.s3Endpoint
+    ? s3
+    : new S3Client({
+        endpoint: config.s3PublicEndpoint,
+        region: config.s3Region,
+        credentials: { accessKeyId: config.s3AccessKey, secretAccessKey: config.s3SecretKey },
+        forcePathStyle: config.s3ForcePathStyle,
+      });
+
 export async function presignResultUrl(bucket: string, key: string): Promise<string> {
-  return getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: key }), {
+  return getSignedUrl(s3Public, new GetObjectCommand({ Bucket: bucket, Key: key }), {
     expiresIn: config.presignExpirySeconds,
   });
 }

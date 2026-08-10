@@ -1,0 +1,31 @@
+{
+  "name": "distributed-mean-api",
+  "version": "1.0.0",
+  "description": "API service for the Distributed Mean system (control plane, off the data plane).",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "migrate": "node dist/migrate-cli.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0",
+    "@aws-sdk/s3-request-presigner": "^3.658.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "pg": "^8.13.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.7.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.6.2"
+  }
+}

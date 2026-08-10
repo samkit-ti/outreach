@@ -1,0 +1,107 @@
+/* Distributed Mean — shared design tokens.
+   Palette is lifted verbatim from docs/simulator.html so the dashboard, the
+   landing page and the design lab read as one product. Light is the base
+   definition; dark is redefined twice (system preference + explicit opt-in)
+   so an explicit [data-theme] always wins in both directions. */
+
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f0efec;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --baseline: #c3c2b7; --ring: rgba(11,11,11,.10);
+  --accent: #2a78d6;
+  --c-map: #eb6834; --c-red: #1baf7a; --c-fin: #eda100;
+  --s-warn: #fab219; --s-crit: #d03b3b; --s-good: #0ca30c;
+  --chosen-bg: #e7f0e7; --chosen-ink: #006300;
+
+  --radius: 10px;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #242423;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --baseline: #383835; --ring: rgba(255,255,255,.10);
+    --accent: #3987e5;
+    --c-map: #d95926; --c-red: #199e70; --c-fin: #c98500;
+    --chosen-bg: #10240f; --chosen-ink: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #242423;
+  --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --baseline: #383835; --ring: rgba(255,255,255,.10);
+  --accent: #3987e5;
+  --c-map: #d95926; --c-red: #199e70; --c-fin: #c98500;
+  --chosen-bg: #10240f; --chosen-ink: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.5 var(--sans);
+}
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+header.app {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px;
+  padding: 18px 22px 10px;
+}
+header.app h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+header.app .sub { color: var(--ink-2); font-size: 13px; }
+header.app nav { margin-left: auto; display: flex; gap: 14px; font-size: 13px; }
+
+button {
+  font: inherit; padding: 5px 14px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--baseline); background: var(--surface); color: var(--ink);
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.danger  { color: var(--s-crit); border-color: var(--s-crit); }
+button:disabled { opacity: .45; cursor: default; }
+
+input[type=number], input[type=text], select, textarea {
+  padding: 3px 6px; border: 1px solid var(--baseline); border-radius: 6px;
+  background: var(--surface); color: var(--ink); font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+textarea { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+
+.panel {
+  background: var(--surface); border: 1px solid var(--grid);
+  border-radius: var(--radius); padding: 14px 16px;
+}
+.panel > h2 {
+  margin: 0 0 10px; font-size: 12.5px; color: var(--ink-2);
+  text-transform: uppercase; letter-spacing: .05em; font-weight: 600;
+}
+
+.chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--ring); color: var(--ink-2);
+  background: var(--surface-2); letter-spacing: .02em; white-space: nowrap;
+}
+.chip.ok   { background: var(--chosen-bg); color: var(--chosen-ink); border-color: transparent; font-weight: 700; }
+.chip.bad  { color: var(--s-crit); border-color: var(--s-crit); }
+.chip.warn { color: var(--ink); background: color-mix(in srgb, var(--s-warn) 25%, var(--surface)); }
+.chip.run  { color: var(--ink); background: color-mix(in srgb, var(--accent) 22%, var(--surface)); }
+
+.pbar {
+  height: 6px; border-radius: 4px; background: var(--surface-2);
+  overflow: hidden; min-width: 90px;
+}
+.pbar > div { height: 100%; background: var(--accent); border-radius: 4px; transition: width .2s linear; }
+.pbar.done > div { background: var(--chosen-ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pbar > div { transition: none; }
+  * { scroll-behavior: auto !important; }
+}

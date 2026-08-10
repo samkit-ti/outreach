@@ -1,0 +1,1189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Distributed Mean — Live Ops</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  .bar {
+    display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+    padding: 10px 22px; border-block: 1px solid var(--grid); background: var(--surface);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .bar label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12.5px; }
+  .bar input[type=number] { width: 72px; }
+  .bar .spacer { margin-left: auto; }
+
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.live    { background: var(--s-good); }
+  .dot.poll    { background: var(--s-warn); }
+  .dot.offline { background: var(--s-crit); }
+  .dot.connecting { background: var(--accent); }
+
+  main { padding: 14px 22px 40px; }
+  .grid {
+    display: grid; gap: 14px; align-items: start;
+    grid-template-columns: minmax(300px, 26rem) minmax(360px, 1fr);
+  }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .col { display: grid; gap: 14px; align-content: start; }
+
+  /* metric row */
+  .metrics { display: flex; flex-wrap: wrap; gap: 4px 20px; margin-bottom: 10px; }
+  .metric { display: flex; flex-direction: column; gap: 1px; }
+  .metric .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .metric .v { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .metric .v small { font-size: 11.5px; font-weight: 400; color: var(--ink-2); }
+  .metric.diverged .v { color: var(--s-warn); }
+
+  table.rows { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.rows th {
+    text-align: left; font-weight: 600; color: var(--muted); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .05em; padding: 4px 8px 4px 0;
+    border-bottom: 1px solid var(--grid); white-space: nowrap;
+  }
+  table.rows td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+  table.rows tr:last-child td { border-bottom: none; }
+  table.rows td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; padding-right: 10px; }
+  table.rows td.id { font-family: var(--mono); font-size: 11.5px; }
+  .empty { color: var(--muted); font-size: 12.5px; padding: 8px 0; }
+  .scroll-y { max-height: 300px; overflow-y: auto; }
+
+  .wstate { display: inline-flex; align-items: center; gap: 5px; }
+  .wdot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .wdot.busy { background: var(--c-map); }
+  .wdot.free { background: var(--s-good); }
+  .wdot.draining { background: var(--s-warn); }
+  .wdot.stale { background: var(--s-crit); }
+  .stale-ink { color: var(--s-crit); font-weight: 600; }
+
+  /* stall gauges */
+  .gauges { display: grid; gap: 8px; margin-top: 10px; }
+  .gauge {
+    display: grid; grid-template-columns: 1fr auto; gap: 2px 10px;
+    padding: 8px 10px; border: 1px solid var(--grid); border-radius: 8px;
+    background: var(--surface-2);
+  }
+  .gauge .g-k { font-size: 11.5px; color: var(--ink-2); }
+  .gauge .g-v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; grid-row: 1 / span 2; align-self: center; }
+  .gauge .g-n { font-size: 11px; color: var(--muted); }
+  .gauge.warn { border-color: var(--s-warn); background: color-mix(in srgb, var(--s-warn) 14%, var(--surface)); }
+  .gauge.warn .g-v, .gauge.warn .g-n { color: var(--s-warn); }
+  .gauge.crit { border-color: var(--s-crit); background: color-mix(in srgb, var(--s-crit) 14%, var(--surface)); }
+  .gauge.crit .g-v, .gauge.crit .g-n { color: var(--s-crit); }
+
+  .bytype { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tt {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    border: 1px solid var(--grid); border-radius: 999px; padding: 3px 10px 3px 8px;
+  }
+  .tt i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+  .tt b { font-variant-numeric: tabular-nums; }
+  .tt .cl { color: var(--muted); font-size: 11px; }
+
+  /* submit form */
+  form.submit { display: grid; gap: 8px; }
+  form.submit textarea { width: 100%; min-height: 92px; resize: vertical; }
+  form.submit .frow { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+  form.submit .frow label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12.5px; }
+  form.submit input[type=number] { width: 96px; }
+  .hint { font-size: 11.5px; color: var(--muted); }
+  .out { font-size: 12.5px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--grid); background: var(--surface-2); }
+  .out.err { border-color: var(--s-crit); color: var(--s-crit); }
+  .out.ok  { border-color: var(--chosen-ink); }
+  .out .mono { font-size: 11.5px; }
+  .out[hidden] { display: none; }
+
+  /* jobs */
+  .jobs-progress { display: flex; align-items: center; gap: 8px; min-width: 130px; }
+  .jobs-progress .pct { font-family: var(--mono); font-size: 11.5px; width: 4ch; text-align: right; flex: none; }
+
+  /* event log */
+  .log {
+    height: 340px; overflow-y: auto; border: 1px solid var(--grid); border-radius: 8px;
+    background: var(--surface); padding: 8px 10px; font-size: 11.5px; line-height: 1.7;
+    font-family: var(--mono);
+  }
+  .log .row { display: flex; gap: 8px; align-items: baseline; }
+  .log .t { color: var(--muted); flex: none; }
+  .log .ty { flex: none; min-width: 17ch; }
+  .log .msg { color: var(--ink-2); word-break: break-word; }
+  .log .row.good .ty { color: var(--s-good); }
+  .log .row.warn .ty { color: var(--s-warn); }
+  .log .row.crit .ty { color: var(--s-crit); }
+  .log .row.alert {
+    background: color-mix(in srgb, var(--s-crit) 16%, transparent);
+    border-left: 3px solid var(--s-crit); margin: 2px -10px 2px -10px; padding: 2px 10px 2px 7px;
+  }
+  .log .row.alert .ty, .log .row.alert .msg { color: var(--s-crit); font-weight: 600; }
+  .log-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 0 0 8px; }
+  .log-head h2 { margin: 0; }
+  .log-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+  .log-head .spacer { margin-left: auto; }
+  .folded { font-size: 11.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="app">
+  <h1>Distributed Mean &mdash; Live Ops</h1>
+  <span class="sub" id="apiLabel">&nbsp;</span>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="simulator.html">Design lab</a>
+  </nav>
+</header>
+
+<div class="bar">
+  <span class="conn"><span class="dot connecting" id="connDot"></span><span id="connText">connecting&hellip;</span></span>
+  <span class="conn" id="freshWrap" hidden>&middot; last frame <span class="mono" id="freshVal">&mdash;</span></span>
+  <span class="spacer"></span>
+  <label>Desired W
+    <input type="number" id="wInput" min="0" max="32" step="1" value="4"
+           title="system_config.desired_workers — the supervisor reconciles actual toward it (0–32)">
+  </label>
+  <button id="wSet">Set W</button>
+  <button id="btnReconnect" title="Drop and re-establish the event stream">Reconnect</button>
+</div>
+
+<main>
+  <div class="grid">
+
+    <div class="col">
+      <!-- ============ FLEET ============ -->
+      <section class="panel" aria-labelledby="h-fleet">
+        <h2 id="h-fleet">Fleet</h2>
+        <div class="metrics">
+          <div class="metric" id="mDesired"><span class="k">Desired W</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mActual"><span class="k">Actual W</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mFree"><span class="k">Free</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mBusy"><span class="k">Busy</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mDraining"><span class="k">Draining</span><span class="v">&mdash;</span></div>
+        </div>
+        <div id="fleetNote" class="hint" hidden></div>
+        <div class="scroll-y">
+          <table class="rows" id="workerTable">
+            <thead><tr>
+              <th>Worker</th><th>State</th><th class="num">Speed</th><th class="num">HB age</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="workerEmpty">No worker roster in the stream yet.</div>
+      </section>
+
+      <!-- ============ QUEUE ============ -->
+      <section class="panel" aria-labelledby="h-queue">
+        <h2 id="h-queue">Queue</h2>
+        <div class="metrics">
+          <div class="metric" id="mPending"><span class="k">Pending</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mClaimed"><span class="k">Claimed</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mThru"><span class="k">Throughput</span><span class="v">&mdash;</span></div>
+        </div>
+        <div class="bytype" id="byType"></div>
+        <div class="gauges">
+          <div class="gauge" id="gPending">
+            <span class="g-k">oldest_pending_age_sec</span>
+            <span class="g-v">&mdash;</span>
+            <span class="g-n">nothing is claiming when this climbs</span>
+          </div>
+          <div class="gauge" id="gClaimed">
+            <span class="g-k">oldest_claimed_age_sec</span>
+            <span class="g-v">&mdash;</span>
+            <span class="g-n">something claimed and never finished when this climbs</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ SUBMIT ============ -->
+      <section class="panel" aria-labelledby="h-submit">
+        <h2 id="h-submit">Submit a job</h2>
+        <form class="submit" id="submitForm">
+          <label for="uris" class="hint">inputUris &mdash; one pre-existing weight file per line (F = line count)</label>
+          <textarea id="uris" spellcheck="false" placeholder="s3://node-a/weights/run7-0001.f64&#10;s3://node-a/weights/run7-0002.f64&#10;s3://node-b/weights/run7-0003.csv"></textarea>
+          <div class="frow">
+            <label>C <input type="number" id="cVal" min="2" max="999999" step="1" value="100000"
+                   title="values per file — every input must hold exactly C values"></label>
+            <span class="hint" id="fCount">F = 0</span>
+            <button class="primary" type="submit" id="btnSubmit">POST /jobs</button>
+          </div>
+        </form>
+        <div class="out" id="submitOut" hidden></div>
+      </section>
+    </div>
+
+    <div class="col">
+      <!-- ============ JOBS ============ -->
+      <section class="panel" aria-labelledby="h-jobs">
+        <h2 id="h-jobs">Jobs</h2>
+        <div class="metrics">
+          <div class="metric" id="mJQueued"><span class="k">Queued</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mJRunning"><span class="k">Running</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mJCompleted"><span class="k">Completed</span><span class="v">&mdash;</span></div>
+          <div class="metric" id="mJFailed"><span class="k">Failed</span><span class="v">&mdash;</span></div>
+        </div>
+        <div class="hint">queued = a live job with pending work and 0 tasks in flight &middot; progress is
+          monotone file coverage, clamped at 99&nbsp;% until finalize commits</div>
+        <div class="scroll-y" style="max-height:420px">
+          <table class="rows" id="jobTable">
+            <thead><tr>
+              <th>Job</th><th class="num">F</th><th class="num">C</th><th>Status</th>
+              <th>Progress</th><th>Completed</th><th>Result</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="jobEmpty">No jobs yet.</div>
+      </section>
+
+      <!-- ============ EVENT LOG ============ -->
+      <section class="panel" aria-labelledby="h-log">
+        <div class="log-head">
+          <h2 id="h-log">Event log</h2>
+          <span class="folded" id="foldedNote"></span>
+          <span class="spacer"></span>
+          <label><input type="checkbox" id="autoscroll" checked> autoscroll</label>
+          <button id="btnClearLog">Clear</button>
+        </div>
+        <div class="log" id="log" role="log" aria-live="polite" aria-label="streaming system events"></div>
+      </section>
+    </div>
+
+  </div>
+</main>
+
+<script>
+'use strict';
+
+/* ============================================================
+   Distributed Mean — live ops dashboard.
+   Contract: docs/03-lld.md §6, docs/itds/DM-009. Zero build, zero CDN.
+   ============================================================ */
+
+/* ---------------- API base: one const, ?api= overrides ---------------- */
+const DEFAULT_API = 'http://localhost:8080';
+const API = (function () {
+  var q = new URLSearchParams(location.search).get('api');
+  var base = (q && q.trim()) || DEFAULT_API;
+  return base.replace(/\/+$/, '');
+})();
+
+/* Tuning. The 1 s visibility lag plus the 1 Hz ticker put worst-case
+   freshness at ~2 s (DM-009), so thresholds are generous relative to that. */
+const CFG = {
+  pollMs: 2000,            // fallback poll cadence (DM-009: 2 s)
+  jobsRefreshMs: 15000,    // GET /jobs sweep, for completed_at + jobs off per_job
+  sseFailsBeforePoll: 3,   // consecutive errors with no frame before we give up on SSE
+  sseRetryMs: 20000,       // while polling, retry SSE this often
+  logMax: 500,
+  leaseSec: 30,            // LEASE_SECONDS (LLD §8) — heartbeat age past this is stale
+  gaugeWarnStreak: 5,      // consecutive rising 1 Hz samples → warn
+  gaugeCritStreak: 15,
+  wMax: 32,                // W_max (LLD §8)
+};
+
+const $ = function (id) { return document.getElementById(id); };
+document.getElementById('apiLabel').textContent = 'API ' + API;
+
+/* ============================================================
+   State
+   ============================================================ */
+const state = {
+  transport: 'connecting',     // connecting | live | poll | offline
+  es: null,
+  sseFails: 0,
+  lastEventId: null,           // for a *manual* reconnect (see API assumptions)
+  lastFrameAt: 0,
+  pollTimer: null,
+  sseRetryTimer: null,
+  jobsTimer: null,
+  jobsInFlight: false,
+  snap: null,                  // last normalized snapshot
+  workers: new Map(),          // id -> {id,status,speed,hbAgeSec,hbAt,fromEvents}
+  workersFromSnapshot: false,
+  jobs: new Map(),             // id -> merged job record
+  maxProgress: new Map(),      // id -> monotone floor for display
+  folded: 0,                   // high-cardinality events seen but not logged
+  submitKey: null,             // Idempotency-Key, stable across retries of one intent
+  gauges: {},
+};
+
+/* ============================================================
+   Small helpers
+   ============================================================ */
+function num(v) { var n = Number(v); return Number.isFinite(n) ? n : null; }
+function pick(o) {
+  if (!o) return null;
+  for (var i = 1; i < arguments.length; i++) {
+    var k = arguments[i];
+    if (o[k] !== undefined && o[k] !== null) return o[k];
+  }
+  return null;
+}
+function shortId(id) { return typeof id === 'string' ? id.slice(0, 8) : String(id == null ? '' : id); }
+function fmtNum(v) { return v == null ? '—' : Number(v).toLocaleString('en-US'); }
+function fmtSec(v) {
+  if (v == null) return '—';
+  var n = Number(v);
+  if (n < 60) return n.toFixed(n < 10 ? 1 : 0) + 's';
+  if (n < 3600) return Math.floor(n / 60) + 'm' + String(Math.round(n % 60)).padStart(2, '0') + 's';
+  return Math.floor(n / 3600) + 'h' + String(Math.floor((n % 3600) / 60)).padStart(2, '0') + 'm';
+}
+function fmtClock(iso) {
+  if (!iso) return '—';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleTimeString('en-GB', { hour12: false });
+}
+function setMetric(el, value, sub) {
+  var v = el.querySelector('.v');
+  v.textContent = '';
+  v.appendChild(document.createTextNode(value == null ? '—' : String(value)));
+  if (sub) { var s = document.createElement('small'); s.textContent = ' ' + sub; v.appendChild(s); }
+}
+
+/* ============================================================
+   Normalizers — one internal model, two wire shapes.
+   DM-009: the poll fallback is "a second trigger for the same render
+   function", so both /events snapshots and GET /system/stats fold here.
+   ============================================================ */
+function normByType(raw) {
+  var out = { map: { pending: null, claimed: null }, reduce: { pending: null, claimed: null },
+              finalize: { pending: null, claimed: null } };
+  if (!raw || typeof raw !== 'object') return out;
+  Object.keys(out).forEach(function (t) {
+    var v = raw[t];
+    if (v == null) return;
+    if (typeof v === 'object') {
+      out[t].pending = num(pick(v, 'pending'));
+      out[t].claimed = num(pick(v, 'claimed'));
+    } else {
+      out[t].pending = num(v);          // scalar = the pending breakdown (DM-009 frame)
+    }
+  });
+  // an optional sibling map carrying the claimed breakdown
+  var cb = pick(raw, 'claimed_by_type', 'claimedByType');
+  if (cb && typeof cb === 'object') {
+    Object.keys(out).forEach(function (t) { if (cb[t] != null) out[t].claimed = num(cb[t]); });
+  }
+  return out;
+}
+
+/** Fold a `stats.snapshot` frame (DM-009) into the internal model. */
+function normSnapshot(d) {
+  var w = d.workers || {};
+  var q = d.queue || {};
+  var j = d.jobs || {};
+  var byTypeRaw = pick(q, 'by_type', 'byType') || {};
+  var claimedByType = pick(q, 'claimed_by_type', 'claimedByType');
+  if (claimedByType) byTypeRaw = Object.assign({}, byTypeRaw, { claimed_by_type: claimedByType });
+  return {
+    at: Date.now(),
+    workers: {
+      desired:  num(pick(w, 'desired')),
+      actual:   num(pick(w, 'actual', 'alive')),
+      free:     num(pick(w, 'free', 'idle')),
+      busy:     num(pick(w, 'busy')),
+      draining: num(pick(w, 'draining')),
+      list:     pick(w, 'list', 'workers', 'rows'),
+    },
+    queue: {
+      pending: num(pick(q, 'pending')),
+      claimed: num(pick(q, 'claimed')),
+      byType: normByType(byTypeRaw),
+      oldestPending: num(pick(q, 'oldest_pending_age_sec', 'oldestPendingAgeSec')),
+      oldestClaimed: num(pick(q, 'oldest_claimed_age_sec', 'oldestClaimedAgeSec')),
+    },
+    jobs: {
+      queued:    num(pick(j, 'queued')),
+      running:   num(pick(j, 'running')),
+      completed: num(pick(j, 'completed')),
+      failed:    num(pick(j, 'failed')),
+    },
+    throughput: num(pick(d, 'throughput_tasks_per_sec', 'throughputTasksPerSec', 'throughput')),
+    perJob: pick(d, 'per_job', 'perJob') || [],
+  };
+}
+
+/** Fold GET /system/stats (LLD §6) into the same model. Its shape differs:
+    workers.alive not .actual, the two age gauges sit at the top level, and
+    the task counts live under `tasks`. */
+function normStats(d) {
+  var w = d.workers || {};
+  var t = d.tasks || {};
+  var j = d.jobs || {};
+  var q = d.queue || {};
+  var byTypeRaw = pick(t, 'by_type', 'byType') || pick(q, 'by_type', 'byType') || {};
+  return {
+    at: Date.now(),
+    workers: {
+      desired:  num(pick(w, 'desired')),
+      actual:   num(pick(w, 'alive', 'actual')),
+      free:     num(pick(w, 'idle', 'free')),
+      busy:     num(pick(w, 'busy')),
+      draining: num(pick(w, 'draining')),
+      list:     pick(w, 'list', 'workers', 'rows'),
+    },
+    queue: {
+      pending: num(pick(t, 'pending') !== null ? pick(t, 'pending') : pick(q, 'pending')),
+      claimed: num(pick(t, 'claimed') !== null ? pick(t, 'claimed') : pick(q, 'claimed')),
+      byType: normByType(byTypeRaw),
+      oldestPending: num(pick(d, 'oldest_pending_age_sec', 'oldestPendingAgeSec') !== null
+        ? pick(d, 'oldest_pending_age_sec', 'oldestPendingAgeSec')
+        : pick(q, 'oldest_pending_age_sec', 'oldestPendingAgeSec')),
+      oldestClaimed: num(pick(d, 'oldest_claimed_age_sec', 'oldestClaimedAgeSec') !== null
+        ? pick(d, 'oldest_claimed_age_sec', 'oldestClaimedAgeSec')
+        : pick(q, 'oldest_claimed_age_sec', 'oldestClaimedAgeSec')),
+    },
+    jobs: {
+      queued:    num(pick(j, 'queued')),
+      running:   num(pick(j, 'running')),
+      completed: num(pick(j, 'completed')),
+      failed:    num(pick(j, 'failed')),
+    },
+    throughput: num(pick(d, 'throughput_tasks_per_sec', 'throughput')),
+    perJob: pick(d, 'per_job', 'perJob') || [],
+  };
+}
+
+/** Merge one job record from either source. Keyed by id; fields win when present. */
+function mergeJob(raw) {
+  var id = pick(raw, 'id', 'jobId', 'job_id');
+  if (!id) return;
+  var cur = state.jobs.get(id) || { id: id };
+  var f = num(pick(raw, 'F', 'f'));
+  var c = num(pick(raw, 'C', 'c'));
+  if (f != null) cur.f = f;
+  if (c != null) cur.c = c;
+  var st = pick(raw, 'status');
+  if (st) cur.status = String(st);
+  var p = num(pick(raw, 'progress'));
+  if (p != null) cur.progress = p > 1 ? p / 100 : p;   // tolerate 0–1 or 0–100
+  var ca = pick(raw, 'completed_at', 'completedAt');
+  if (ca) cur.completedAt = ca;
+  var cr = pick(raw, 'created_at', 'createdAt');
+  if (cr) cur.createdAt = cr;
+  var eta = num(pick(raw, 'eta_sec', 'etaSec'));
+  if (eta != null) cur.etaSec = eta;
+  var inf = num(pick(raw, 'in_flight', 'inFlight'));
+  if (inf != null) cur.inFlight = inf;
+  var pl = num(pick(raw, 'partials_live', 'partialsLive'));
+  if (pl != null) cur.partialsLive = pl;
+  var err = pick(raw, 'error');
+  if (err) cur.error = String(err);
+  cur.seenAt = Date.now();
+  state.jobs.set(id, cur);
+}
+
+/* ============================================================
+   Transport — SSE primary, polling fallback (DM-009 D11)
+   ============================================================ */
+
+/* The event taxonomy from DM-009. EventSource has no wildcard listener:
+   `onmessage` fires only for frames with no `event:` field, so every named
+   type must be registered explicitly. */
+const LOGGED_TYPES = [
+  'job.submitted', 'job.running', 'job.completed', 'job.failed',
+  'job.stranded', 'job.needs_finalize',
+  'task.failed', 'task.lease_expired', 'task.dead',
+  'worker.registered', 'worker.draining', 'worker.gone',
+  'config.desired_workers_changed',
+  'backstop.fired',
+];
+/* Per-task / per-partial events are written to `events` as the audit trail but
+   are explicitly NOT streamed individually (DM-009: ~50k per max job). We
+   subscribe anyway so that a server which does stream them gets folded into a
+   counter instead of flooding — or silently dropped. */
+const FOLDED_TYPES = ['task.created', 'task.claimed', 'task.done', 'partial.committed', 'partials.reduced'];
+
+/* Alerting-worthy per DM-009: the two stall gauges plus these. */
+const ALERT_TYPES = ['job.stranded', 'job.needs_finalize', 'backstop.fired'];
+
+function severityOf(type) {
+  if (ALERT_TYPES.indexOf(type) >= 0) return 'alert';
+  if (type === 'job.failed' || type === 'task.dead') return 'crit';
+  if (type === 'task.failed' || type === 'task.lease_expired' || type === 'worker.gone'
+      || type === 'worker.draining') return 'warn';
+  if (type === 'job.completed') return 'good';
+  return '';
+}
+
+function setTransport(kind, detail) {
+  state.transport = kind;
+  var dot = $('connDot'), txt = $('connText');
+  dot.className = 'dot ' + kind;
+  var label = kind === 'live' ? 'live · SSE'
+    : kind === 'poll' ? 'poll fallback · 2s'
+    : kind === 'offline' ? 'offline'
+    : 'connecting…';
+  txt.textContent = detail ? label + ' (' + detail + ')' : label;
+  $('freshWrap').hidden = (kind !== 'live' && kind !== 'poll');
+}
+
+function openSSE() {
+  closeSSE();
+  setTransport('connecting');
+  var url = API + '/events';
+  /* API ASSUMPTION: on a *manual* reconnect the browser cannot resend
+     Last-Event-ID (it only does so for its own automatic retries), so we pass
+     the cursor as a query param. A server that ignores it simply hands us the
+     tail — the header-based resume on automatic retries is unaffected. */
+  if (state.lastEventId != null) url += '?lastEventId=' + encodeURIComponent(state.lastEventId);
+  var es;
+  try {
+    es = new EventSource(url);
+  } catch (e) {
+    logLine(null, 'ui.error', 'EventSource unavailable: ' + e.message, 'crit');
+    startPolling('EventSource unavailable');
+    return;
+  }
+  state.es = es;
+
+  es.onopen = function () {
+    state.sseFails = 0;
+    setTransport('live');
+    stopPolling();
+    refreshJobs();
+  };
+
+  es.addEventListener('stats.snapshot', function (ev) {
+    state.sseFails = 0;
+    if (state.transport !== 'live') { setTransport('live'); stopPolling(); }
+    rememberId(ev.lastEventId);
+    var d = parseData(ev.data);
+    if (d) applySnapshot(normSnapshot(d));
+  });
+
+  LOGGED_TYPES.forEach(function (type) {
+    es.addEventListener(type, function (ev) {
+      state.sseFails = 0;
+      rememberId(ev.lastEventId);
+      handleEvent(type, ev.lastEventId, parseData(ev.data));
+    });
+  });
+  FOLDED_TYPES.forEach(function (type) {
+    es.addEventListener(type, function (ev) {
+      rememberId(ev.lastEventId);
+      state.folded++;
+      renderFolded();
+    });
+  });
+
+  /* Unnamed frames (no `event:` line) plus anything whose type we do not know
+     but that carries a `type` in its payload. */
+  es.onmessage = function (ev) {
+    state.sseFails = 0;
+    rememberId(ev.lastEventId);
+    var d = parseData(ev.data);
+    if (!d) return;
+    var t = pick(d, 'type');
+    if (t === 'stats.snapshot' || (d.workers && d.queue && d.jobs)) {
+      applySnapshot(normSnapshot(d.payload && d.payload.workers ? d.payload : d));
+      return;
+    }
+    handleEvent(t ? String(t) : 'message', ev.lastEventId, d);
+  };
+
+  es.onerror = function () {
+    /* EventSource retries on its own (resending Last-Event-ID). We only give up
+       after repeated failures with no frame in between. */
+    state.sseFails++;
+    if (es.readyState === EventSource.CLOSED || state.sseFails >= CFG.sseFailsBeforePoll) {
+      logLine(null, 'ui.stream', 'event stream failed ' + state.sseFails + '× — falling back to 2s polling', 'warn');
+      closeSSE();
+      startPolling('stream error');
+    } else {
+      setTransport('connecting', 'retry ' + state.sseFails);
+    }
+  };
+}
+
+function closeSSE() {
+  if (state.es) { try { state.es.close(); } catch (e) { /* already closed */ } }
+  state.es = null;
+}
+function rememberId(id) {
+  if (id === undefined || id === null || id === '') return;
+  var n = Number(id);
+  if (Number.isFinite(n)) {
+    if (state.lastEventId == null || n > Number(state.lastEventId)) state.lastEventId = n;
+  } else {
+    state.lastEventId = id;
+  }
+}
+function parseData(raw) {
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return { _raw: String(raw) }; }
+}
+
+/* ---------------- poll fallback ---------------- */
+function startPolling(why) {
+  if (state.pollTimer) return;
+  setTransport('poll', why);
+  pollOnce();
+  state.pollTimer = setInterval(pollOnce, CFG.pollMs);
+  if (!state.sseRetryTimer) {
+    state.sseRetryTimer = setInterval(function () {
+      if (state.transport === 'poll' || state.transport === 'offline') openSSE();
+    }, CFG.sseRetryMs);
+  }
+}
+function stopPolling() {
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+}
+function pollOnce() {
+  fetch(API + '/system/stats', { headers: { Accept: 'application/json' } })
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function (d) {
+      if (state.transport === 'offline') setTransport('poll', 'recovered');
+      applySnapshot(normStats(d));
+    })
+    .catch(function (e) { setTransport('offline', e.message); });
+  refreshJobs();
+}
+
+/* ---------------- GET /jobs sweep ----------------
+   per_job in the snapshot carries live progress for active jobs; GET /jobs is
+   the only place completed_at and finished jobs come from. */
+function refreshJobs() {
+  if (state.jobsInFlight) return;
+  state.jobsInFlight = true;
+  fetch(API + '/jobs?limit=50', { headers: { Accept: 'application/json' } })
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function (d) {
+      var arr = Array.isArray(d) ? d : (pick(d, 'jobs', 'items', 'data') || []);
+      if (Array.isArray(arr)) arr.forEach(mergeJob);
+      renderJobs();
+    })
+    .catch(function () { /* stats/SSE already surface connectivity */ })
+    .then(function () { state.jobsInFlight = false; });
+}
+
+/* ============================================================
+   Event handling
+   ============================================================ */
+var jobsDebounce = null;
+function handleEvent(type, id, d) {
+  d = d || {};
+  var payload = (d.payload && typeof d.payload === 'object') ? d.payload : d;
+  var jobId = pick(d, 'job_id', 'jobId') || pick(payload, 'job_id', 'jobId');
+  var workerId = pick(d, 'worker_id', 'workerId') || pick(payload, 'worker_id', 'workerId');
+
+  /* Keep a worker roster alive from worker.* events when the snapshot carries
+     only counts (see API assumptions). Snapshot-supplied rows always win. */
+  if (!state.workersFromSnapshot && workerId) {
+    if (type === 'worker.gone') {
+      state.workers.delete(workerId);
+    } else if (type === 'worker.registered' || type === 'worker.draining') {
+      var w = state.workers.get(workerId) || { id: workerId, fromEvents: true };
+      w.status = (type === 'worker.draining') ? 'draining' : (w.status || 'idle');
+      var sf = num(pick(payload, 'speed_factor', 'speedFactor'));
+      if (sf != null) w.speed = sf;
+      w.hbAt = Date.now();
+      state.workers.set(workerId, w);
+    }
+    renderWorkers();
+  }
+
+  if (type === 'config.desired_workers_changed') {
+    var des = num(pick(payload, 'desired', 'desired_workers', 'desiredWorkers'));
+    if (des != null && document.activeElement !== $('wInput')) $('wInput').value = des;
+  }
+
+  if (jobId) {
+    var patch = { id: jobId };
+    if (type === 'job.submitted') { patch.status = 'pending'; }
+    if (type === 'job.running') { patch.status = 'running'; }
+    if (type === 'job.completed') { patch.status = 'completed'; patch.progress = 1; }
+    if (type === 'job.failed') { patch.status = 'failed'; }
+    var pf = num(pick(payload, 'f', 'F'));
+    if (pf != null) patch.f = pf;
+    var pc = num(pick(payload, 'c', 'C'));
+    if (pc != null) patch.c = pc;
+    if (Object.keys(patch).length > 1) mergeJob(patch);
+    if (type.indexOf('job.') === 0) {
+      /* completed_at, result_uri and terminal state come from GET /jobs. */
+      clearTimeout(jobsDebounce);
+      jobsDebounce = setTimeout(refreshJobs, 400);
+    }
+    renderJobs();
+  }
+
+  logLine(id, type, summarize(type, d, payload), severityOf(type));
+}
+
+function summarize(type, d, payload) {
+  var bits = [];
+  var jobId = pick(d, 'job_id', 'jobId') || pick(payload, 'job_id', 'jobId');
+  var taskId = pick(d, 'task_id', 'taskId') || pick(payload, 'task_id', 'taskId');
+  var workerId = pick(d, 'worker_id', 'workerId') || pick(payload, 'worker_id', 'workerId');
+  if (jobId) bits.push('job=' + shortId(jobId));
+  if (taskId) bits.push('task=' + shortId(taskId));
+  if (workerId) bits.push('worker=' + workerId);
+  var interesting = ['f', 'F', 'c', 'C', 'desired', 'desired_workers', 'type', 'task_type',
+    'fan_in', 'count', 'attempts', 'attempt', 'speed_factor', 'reason', 'error', 'message', 'progress'];
+  interesting.forEach(function (k) {
+    if (payload && payload[k] !== undefined && payload[k] !== null && k !== 'type') {
+      var v = payload[k];
+      if (typeof v === 'object') return;
+      bits.push(k + '=' + String(v).slice(0, 120));
+    }
+  });
+  if (!bits.length && payload && payload._raw) bits.push(String(payload._raw).slice(0, 200));
+  return bits.join('  ');
+}
+
+/* ============================================================
+   Snapshot application + rendering
+   ============================================================ */
+function applySnapshot(s) {
+  state.snap = s;
+  state.lastFrameAt = s.at;
+
+  if (Array.isArray(s.workers.list) && s.workers.list.length) {
+    state.workersFromSnapshot = true;
+    state.workers = new Map();
+    s.workers.list.forEach(function (w) {
+      var id = pick(w, 'id', 'worker_id', 'workerId');
+      if (!id) return;
+      /* Prefer a server-computed age: deriving it from an ISO timestamp against
+         the browser clock imports any clock skew between the two. */
+      var ageSec = num(pick(w, 'last_heartbeat_age_sec', 'lastHeartbeatAgeSec', 'heartbeat_age_sec'));
+      var hbIso = pick(w, 'last_heartbeat', 'lastHeartbeat');
+      if (ageSec == null && hbIso) {
+        var t = new Date(hbIso).getTime();
+        if (!isNaN(t)) ageSec = Math.max(0, (Date.now() - t) / 1000);
+      }
+      state.workers.set(String(id), {
+        id: String(id),
+        status: String(pick(w, 'status', 'state') || 'idle'),
+        speed: num(pick(w, 'speed_factor', 'speedFactor')),
+        hbAgeSec: ageSec,
+        currentTask: pick(w, 'current_task', 'currentTask'),
+        tasksCompleted: num(pick(w, 'tasks_completed', 'tasksCompleted')),
+      });
+    });
+  }
+
+  (s.perJob || []).forEach(mergeJob);
+
+  renderFleet();
+  renderQueue();
+  renderWorkers();
+  renderJobs();
+}
+
+function renderFleet() {
+  var s = state.snap; if (!s) return;
+  var w = s.workers;
+  setMetric($('mDesired'), fmtNum(w.desired));
+  setMetric($('mActual'), fmtNum(w.actual));
+  setMetric($('mFree'), fmtNum(w.free));
+  setMetric($('mBusy'), fmtNum(w.busy));
+  setMetric($('mDraining'), fmtNum(w.draining));
+  var diverged = (w.desired != null && w.actual != null && w.desired !== w.actual);
+  $('mActual').classList.toggle('diverged', diverged);
+  var note = $('fleetNote');
+  if (diverged) {
+    note.hidden = false;
+    note.textContent = 'reconciling — supervisor is moving actual toward desired ('
+      + w.actual + ' → ' + w.desired + ')';
+  } else { note.hidden = true; }
+  if (document.activeElement !== $('wInput') && w.desired != null && $('wInput').dataset.touched !== '1') {
+    $('wInput').value = w.desired;
+  }
+}
+
+function renderWorkers() {
+  var tb = $('workerTable').querySelector('tbody');
+  tb.textContent = '';
+  var rows = Array.from(state.workers.values()).sort(function (a, b) {
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+  $('workerEmpty').hidden = rows.length > 0;
+  $('workerTable').hidden = rows.length === 0;
+  rows.forEach(function (w) {
+    var tr = document.createElement('tr');
+
+    var tdId = document.createElement('td');
+    tdId.className = 'id';
+    tdId.textContent = w.id;
+    if (w.currentTask) tdId.title = 'current task ' + shortId(w.currentTask);
+    tr.appendChild(tdId);
+
+    var stale = (w.hbAgeSec != null && w.hbAgeSec > CFG.leaseSec);
+    var label = w.status === 'busy' ? 'busy' : w.status === 'draining' ? 'draining' : 'free';
+    var tdSt = document.createElement('td');
+    var span = document.createElement('span');
+    span.className = 'wstate';
+    var dot = document.createElement('span');
+    dot.className = 'wdot ' + (stale ? 'stale' : label);
+    span.appendChild(dot);
+    var lab = document.createElement('span');
+    lab.textContent = stale ? label + ' · stale' : label;
+    if (stale) lab.className = 'stale-ink';
+    span.appendChild(lab);
+    tdSt.appendChild(span);
+    tr.appendChild(tdSt);
+
+    var tdSp = document.createElement('td');
+    tdSp.className = 'num';
+    tdSp.textContent = w.speed == null ? '—' : Number(w.speed).toFixed(2) + '×';
+    if (w.speed != null && w.speed !== 1) tdSp.title = 'artificial slowdown for straggler demos (SPEED_FACTOR)';
+    tr.appendChild(tdSp);
+
+    var tdHb = document.createElement('td');
+    tdHb.className = 'num' + (stale ? ' stale-ink' : '');
+    tdHb.textContent = w.hbAgeSec == null ? '—' : fmtSec(w.hbAgeSec);
+    if (stale) tdHb.title = 'past LEASE_SECONDS=' + CFG.leaseSec + ' — the reaper will requeue its task';
+    tr.appendChild(tdHb);
+
+    tb.appendChild(tr);
+  });
+}
+
+var TYPE_TOKEN = { map: '--c-map', reduce: '--c-red', finalize: '--c-fin' };
+function renderQueue() {
+  var s = state.snap; if (!s) return;
+  var q = s.queue;
+  setMetric($('mPending'), fmtNum(q.pending));
+  setMetric($('mClaimed'), fmtNum(q.claimed));
+  setMetric($('mThru'), s.throughput == null ? '—' : Number(s.throughput).toFixed(1), 'task/s');
+
+  var wrap = $('byType');
+  wrap.textContent = '';
+  ['map', 'reduce', 'finalize'].forEach(function (t) {
+    var v = q.byType[t];
+    var el = document.createElement('span');
+    el.className = 'tt';
+    var i = document.createElement('i');
+    i.style.background = 'var(' + TYPE_TOKEN[t] + ')';
+    el.appendChild(i);
+    el.appendChild(document.createTextNode(t + ' '));
+    var b = document.createElement('b');
+    b.textContent = v.pending == null ? '—' : fmtNum(v.pending);
+    el.appendChild(b);
+    if (v.claimed != null) {
+      var c = document.createElement('span');
+      c.className = 'cl';
+      c.textContent = '+' + fmtNum(v.claimed) + ' claimed';
+      el.appendChild(c);
+    }
+    el.title = t + ' tasks pending' + (v.claimed != null ? ', plus ' + v.claimed + ' claimed' : '');
+    wrap.appendChild(el);
+  });
+
+  paintGauge($('gPending'), 'oldest_pending_age_sec', q.oldestPending,
+    'nothing is claiming when this climbs');
+  paintGauge($('gClaimed'), 'oldest_claimed_age_sec', q.oldestClaimed,
+    'something claimed and never finished when this climbs');
+}
+
+/** The two stall SLIs (DM-009). Absolute value alone is not the signal — under
+    load the oldest pending task legitimately ages until it is claimed. Sustained
+    *growth* is what separates "slow" from "stuck", so we track a rising streak
+    over consecutive 1 Hz samples. */
+function paintGauge(el, key, value, baseNote) {
+  var g = state.gauges[key] || (state.gauges[key] = { prev: null, rising: 0 });
+  if (value == null) { g.rising = 0; g.prev = null; }
+  else {
+    if (g.prev != null) {
+      if (value > g.prev + 0.05) g.rising++;
+      else if (value < g.prev - 0.05) g.rising = 0;
+    }
+    g.prev = value;
+  }
+  var level = g.rising >= CFG.gaugeCritStreak ? 'crit'
+    : g.rising >= CFG.gaugeWarnStreak ? 'warn' : '';
+  el.className = 'gauge' + (level ? ' ' + level : '');
+  el.querySelector('.g-v').textContent = value == null ? '—' : fmtSec(value);
+  el.querySelector('.g-n').textContent = g.rising >= CFG.gaugeWarnStreak
+    ? 'rising for ' + g.rising + ' consecutive frames — ' + baseNote
+    : baseNote;
+}
+
+function renderJobs() {
+  var s = state.snap;
+  if (s) {
+    setMetric($('mJQueued'), fmtNum(s.jobs.queued));
+    setMetric($('mJRunning'), fmtNum(s.jobs.running));
+    setMetric($('mJCompleted'), fmtNum(s.jobs.completed));
+    setMetric($('mJFailed'), fmtNum(s.jobs.failed));
+    $('mJFailed').classList.toggle('diverged', !!s.jobs.failed);
+  }
+
+  var rows = Array.from(state.jobs.values()).sort(function (a, b) {
+    var at = a.createdAt ? Date.parse(a.createdAt) : 0;
+    var bt = b.createdAt ? Date.parse(b.createdAt) : 0;
+    if (at !== bt) return bt - at;                 // newest first
+    return a.id < b.id ? 1 : -1;
+  });
+  var tb = $('jobTable').querySelector('tbody');
+  tb.textContent = '';
+  $('jobEmpty').hidden = rows.length > 0;
+  $('jobTable').hidden = rows.length === 0;
+
+  rows.forEach(function (j) {
+    var tr = document.createElement('tr');
+
+    var tdId = document.createElement('td');
+    tdId.className = 'id';
+    tdId.textContent = shortId(j.id);
+    tdId.title = j.id;
+    tr.appendChild(tdId);
+
+    var tdF = document.createElement('td'); tdF.className = 'num'; tdF.textContent = fmtNum(j.f); tr.appendChild(tdF);
+    var tdC = document.createElement('td'); tdC.className = 'num'; tdC.textContent = fmtNum(j.c); tr.appendChild(tdC);
+
+    var tdSt = document.createElement('td');
+    var pill = document.createElement('span');
+    var st = j.status || 'unknown';
+    pill.className = 'chip ' + (st === 'completed' ? 'ok'
+      : st === 'failed' ? 'bad'
+      : st === 'finalizing' ? 'warn'
+      : st === 'running' ? 'run' : '');
+    pill.textContent = st;
+    if (j.error) pill.title = j.error;
+    tdSt.appendChild(pill);
+    tr.appendChild(tdSt);
+
+    /* Display clamp (DM-009): only the finalize commit writes 100 %. We also
+       hold a monotone floor per job so a server hiccup cannot make a bar move
+       backwards on screen. */
+    var raw = j.progress == null ? 0 : Math.max(0, Math.min(1, j.progress));
+    var floorSeen = state.maxProgress.get(j.id) || 0;
+    if (raw > floorSeen) { floorSeen = raw; state.maxProgress.set(j.id, raw); }
+    var done = (st === 'completed');
+    var pct = done ? 100 : Math.min(99, Math.floor(floorSeen * 100));
+
+    var tdP = document.createElement('td');
+    var box = document.createElement('div');
+    box.className = 'jobs-progress';
+    var bar = document.createElement('div');
+    bar.className = 'pbar' + (done ? ' done' : '');
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuenow', String(pct));
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', '100');
+    bar.setAttribute('aria-label', 'job ' + shortId(j.id) + ' coverage progress');
+    var fill = document.createElement('div');
+    fill.style.width = pct + '%';
+    bar.appendChild(fill);
+    var lab = document.createElement('span');
+    lab.className = 'pct';
+    lab.textContent = pct + '%';
+    box.appendChild(bar);
+    box.appendChild(lab);
+    if (!done && j.etaSec != null) box.title = 'eta ≈ ' + fmtSec(j.etaSec) + ' (estimate)';
+    tdP.appendChild(box);
+    tr.appendChild(tdP);
+
+    var tdCA = document.createElement('td');
+    tdCA.className = 'num';
+    tdCA.textContent = j.completedAt ? fmtClock(j.completedAt) : '—';
+    if (j.completedAt) tdCA.title = String(j.completedAt);
+    tr.appendChild(tdCA);
+
+    var tdR = document.createElement('td');
+    if (done) {
+      var a = document.createElement('a');
+      a.href = API + '/jobs/' + encodeURIComponent(j.id) + '/result';
+      a.textContent = 'result.csv';
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.title = 'GET /jobs/:id/result → 302 to a 15-minute pre-signed URL';
+      tdR.appendChild(a);
+    } else {
+      tdR.className = 'num';
+      tdR.textContent = '—';
+    }
+    tr.appendChild(tdR);
+
+    tb.appendChild(tr);
+  });
+}
+
+/* ============================================================
+   Event log pane
+   ============================================================ */
+function logLine(id, type, msg, sev) {
+  var box = $('log');
+  var atBottom = (box.scrollHeight - box.scrollTop - box.clientHeight) < 24;
+
+  var row = document.createElement('div');
+  row.className = 'row' + (sev ? ' ' + sev : '');
+
+  var t = document.createElement('span');
+  t.className = 't';
+  t.textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  row.appendChild(t);
+
+  var ty = document.createElement('span');
+  ty.className = 'ty';
+  ty.textContent = type;
+  if (id != null && id !== '') ty.title = 'event id ' + id;
+  row.appendChild(ty);
+
+  var m = document.createElement('span');
+  m.className = 'msg';
+  m.textContent = msg || '';
+  row.appendChild(m);
+
+  box.appendChild(row);
+  while (box.children.length > CFG.logMax) box.removeChild(box.firstChild);
+  if ($('autoscroll').checked || atBottom) box.scrollTop = box.scrollHeight;
+}
+function renderFolded() {
+  $('foldedNote').textContent = state.folded
+    ? state.folded.toLocaleString('en-US') + ' per-task events folded into the snapshot'
+    : '';
+}
+
+/* ============================================================
+   Actions
+   ============================================================ */
+$('wInput').addEventListener('input', function () { this.dataset.touched = '1'; });
+
+$('wSet').onclick = function () {
+  var input = $('wInput');
+  var v = Math.round(Number(input.value));
+  if (!Number.isFinite(v) || v < 0 || v > CFG.wMax) {
+    logLine(null, 'ui.error', 'desired W must be an integer in 0…' + CFG.wMax, 'crit');
+    input.focus();
+    return;
+  }
+  $('wSet').disabled = true;
+  fetch(API + '/system/workers', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ desired: v }),
+  })
+    .then(readJsonOrThrow)
+    .then(function (d) {
+      var got = num(pick(d || {}, 'desired'));
+      logLine(null, 'ui.config', 'PATCH /system/workers → desired=' + (got == null ? v : got), 'good');
+      input.dataset.touched = '';
+      if (state.transport === 'poll') pollOnce();
+    })
+    .catch(function (e) { logLine(null, 'ui.error', 'PATCH /system/workers failed: ' + e.message, 'crit'); })
+    .then(function () { $('wSet').disabled = false; });
+};
+
+$('btnReconnect').onclick = function () { stopPolling(); openSSE(); };
+$('btnClearLog').onclick = function () { $('log').textContent = ''; };
+
+$('uris').addEventListener('input', function () {
+  $('fCount').textContent = 'F = ' + parseUris(this.value).length;
+  state.submitKey = null;              // content changed ⇒ a new intent
+});
+
+function parseUris(text) {
+  return String(text || '').split(/\r?\n/)
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+}
+
+$('submitForm').onsubmit = function (ev) {
+  ev.preventDefault();
+  var uris = parseUris($('uris').value);
+  var c = Math.round(Number($('cVal').value));
+  var out = $('submitOut');
+
+  if (uris.length < 2) return showOut(out, 'err', 'F must be at least 2 — give at least two inputUris.');
+  if (!Number.isFinite(c) || c < 2 || c > 999999) return showOut(out, 'err', 'C must be an integer in 2…999999.');
+  var dupes = uris.length - new Set(uris).size;
+  if (dupes > 0) return showOut(out, 'err', dupes + ' duplicate URI(s) — the API rejects duplicates with 422.');
+
+  /* One Idempotency-Key per intent: retrying the same form content after an
+     ambiguous failure must not create a second job (LLD §6 / T1). */
+  if (!state.submitKey) {
+    state.submitKey = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : 'ui-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+  }
+
+  $('btnSubmit').disabled = true;
+  showOut(out, '', 'POST /jobs — F=' + uris.length + ', C=' + c + '…');
+
+  fetch(API + '/jobs', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'Idempotency-Key': state.submitKey,
+    },
+    body: JSON.stringify({ inputUris: uris, c: c }),
+  })
+    .then(readJsonOrThrow)
+    .then(function (d) {
+      var jobId = pick(d || {}, 'jobId', 'id', 'job_id');
+      if (!jobId) throw new Error('202 with no jobId in the body');
+      state.submitKey = null;                       // intent fulfilled
+      mergeJob({ id: jobId, f: uris.length, c: c, status: 'pending', created_at: new Date().toISOString() });
+      renderJobs();
+      showOut(out, 'ok', 'accepted — jobId ', jobId);
+      logLine(null, 'ui.submit', 'POST /jobs accepted job=' + shortId(jobId) + '  F=' + uris.length + ' C=' + c, 'good');
+      clearTimeout(jobsDebounce);
+      jobsDebounce = setTimeout(refreshJobs, 600);
+    })
+    .catch(function (e) { showOut(out, 'err', e.message); })
+    .then(function () { $('btnSubmit').disabled = false; });
+};
+
+function showOut(el, cls, text, mono) {
+  el.hidden = false;
+  el.className = 'out' + (cls ? ' ' + cls : '');
+  el.textContent = text;
+  if (mono) {
+    var s = document.createElement('span');
+    s.className = 'mono';
+    s.textContent = mono;
+    el.appendChild(s);
+  }
+  return false;
+}
+
+/** Unwrap the API's `{error:{code,message,details}}` convention (LLD §6). */
+function readJsonOrThrow(r) {
+  return r.text().then(function (body) {
+    var d = null;
+    if (body) { try { d = JSON.parse(body); } catch (e) { /* non-JSON error body */ } }
+    if (r.ok) return d;
+    var msg = 'HTTP ' + r.status;
+    if (d && d.error) {
+      msg += ' ' + (d.error.code || '') + ' — ' + (d.error.message || '');
+      if (d.error.details) msg += ' [' + (typeof d.error.details === 'string'
+        ? d.error.details : JSON.stringify(d.error.details)).slice(0, 200) + ']';
+    } else if (body) {
+      msg += ' — ' + body.slice(0, 200);
+    }
+    if (r.status === 429) {
+      var ra = r.headers.get('Retry-After');
+      if (ra) msg += ' (retry after ' + ra + 's)';
+    }
+    throw new Error(msg);
+  });
+}
+
+/* ============================================================
+   Boot
+   ============================================================ */
+function tickFreshness() {
+  if (!state.lastFrameAt) { $('freshVal').textContent = '—'; return; }
+  var age = (Date.now() - state.lastFrameAt) / 1000;
+  $('freshVal').textContent = fmtSec(age) + ' ago';
+  /* SSE snapshots are 1 Hz; a live stream that has gone quiet for much longer
+     than the keepalive interval is not actually live. */
+  if (state.transport === 'live' && age > 20) setTransport('connecting', 'no frame for ' + Math.round(age) + 's');
+}
+
+$('fCount').textContent = 'F = 0';
+renderFolded();
+openSSE();
+refreshJobs();
+state.jobsTimer = setInterval(refreshJobs, CFG.jobsRefreshMs);
+setInterval(tickFreshness, 1000);
+</script>
+</body>
+</html>

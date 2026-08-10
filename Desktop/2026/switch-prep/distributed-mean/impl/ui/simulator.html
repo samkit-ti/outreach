@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Distributed Mean — Design Lab</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f0efec;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --baseline: #c3c2b7; --ring: rgba(11,11,11,.10);
+    --accent: #2a78d6;
+    --c-map: #eb6834; --c-red: #1baf7a; --c-fin: #eda100;
+    --s-warn: #fab219; --s-crit: #d03b3b; --s-good: #0ca30c;
+    --chosen-bg: #e7f0e7; --chosen-ink: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --surface-2: #242423;
+      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --baseline: #383835; --ring: rgba(255,255,255,.10);
+      --accent: #3987e5;
+      --c-map: #d95926; --c-red: #199e70; --c-fin: #c98500;
+      --chosen-bg: #10240f; --chosen-ink: #0ca30c;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #242423;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --baseline: #383835; --ring: rgba(255,255,255,.10);
+    --accent: #3987e5;
+    --c-map: #d95926; --c-red: #199e70; --c-fin: #c98500;
+    --chosen-bg: #10240f; --chosen-ink: #0ca30c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace; }
+  header {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px;
+    padding: 18px 22px 10px;
+  }
+  header h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  header .sub { color: var(--ink-2); font-size: 13px; }
+  header nav.site { margin-left: auto; font-size: 13px; }
+  header nav.site a { color: var(--accent); }
+  .bar {
+    display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+    padding: 10px 22px; border-block: 1px solid var(--grid); background: var(--surface);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .bar label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12.5px; }
+  .bar input[type=number], .bar select {
+    width: 76px; padding: 3px 6px; border: 1px solid var(--baseline); border-radius: 6px;
+    background: var(--surface); color: var(--ink); font: inherit;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar select { width: auto; }
+  button {
+    font: inherit; padding: 5px 14px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--baseline); background: var(--surface); color: var(--ink);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.danger  { color: var(--s-crit); border-color: var(--s-crit); }
+  button:disabled { opacity: .45; cursor: default; }
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, [role=tab]:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  nav[role=tablist] { display: flex; gap: 2px; padding: 10px 22px 0; flex-wrap: wrap; }
+  [role=tab] {
+    border: 1px solid transparent; border-bottom: none; background: none; color: var(--ink-2);
+    padding: 7px 14px; border-radius: 9px 9px 0 0; font-size: 13.5px;
+  }
+  [role=tab][aria-selected=true] {
+    background: var(--surface); border-color: var(--grid); color: var(--ink); font-weight: 600;
+  }
+  main { padding: 0 22px 30px; }
+  .panel { background: var(--surface); border: 1px solid var(--grid); border-radius: 0 10px 10px 10px; padding: 16px; }
+  .lanes { display: grid; gap: 14px; }
+  .lane { border: 1px solid var(--grid); border-radius: 10px; padding: 12px 14px; background: var(--surface); }
+  .lane.chosen { border-color: var(--chosen-ink); }
+  .lane-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px; }
+  .lane-head h3 { margin: 0; font-size: 14.5px; }
+  .chip {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--ring);
+    color: var(--ink-2); background: var(--surface-2); letter-spacing: .02em;
+  }
+  .chip.ok { background: var(--chosen-bg); color: var(--chosen-ink); border-color: transparent; font-weight: 700; }
+  .chip.bad { color: var(--s-crit); }
+  .chip.warn { color: var(--ink); background: color-mix(in srgb, var(--s-warn) 25%, var(--surface)); }
+  .lane .why { color: var(--muted); font-size: 12px; margin-left: auto; }
+  canvas.gantt { width: 100%; height: auto; display: block; border: 1px solid var(--grid); border-radius: 6px; background: var(--surface); }
+  .stats { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 8px; font-size: 12.5px; color: var(--ink-2); }
+  .stats b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .pbar { height: 6px; border-radius: 4px; background: var(--surface-2); overflow: hidden; flex: 1 1 120px; align-self: center; min-width: 100px; }
+  .pbar > div { height: 100%; background: var(--accent); border-radius: 4px; transition: width .15s linear; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0 2px; font-size: 12px; color: var(--ink-2); }
+  .legend span { display: inline-flex; gap: 6px; align-items: center; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .logwrap { margin-top: 14px; }
+  .logwrap h4 { margin: 0 0 6px; font-size: 12.5px; color: var(--ink-2); text-transform: uppercase; letter-spacing: .05em; }
+  .log {
+    height: 168px; overflow-y: auto; border: 1px solid var(--grid); border-radius: 8px;
+    background: var(--surface); padding: 8px 10px; font-size: 11.5px; line-height: 1.65;
+  }
+  .log .t { color: var(--muted); }
+  .log .warn { color: var(--s-warn); } .log .crit { color: var(--s-crit); } .log .good { color: var(--s-good); }
+  .prose { max-width: 68ch; }
+  .prose h2 { font-size: 16px; margin: 18px 0 6px; }
+  .prose p, .prose li { color: var(--ink-2); }
+  .prose code { font-family: ui-monospace, Menlo, monospace; font-size: .92em; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; color: var(--ink); }
+  .prose table { border-collapse: collapse; font-size: 13px; }
+  .prose td, .prose th { border: 1px solid var(--grid); padding: 5px 10px; text-align: left; }
+  .finish { font-weight: 700; color: var(--chosen-ink); }
+  @media (prefers-reduced-motion: reduce) { .pbar > div { transition: none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Distributed Mean — Design Lab</h1>
+  <span class="sub">Race the algorithms considered in ITDs DM-001…DM-010. Same seed, same workers — different design decisions.</span>
+  <nav class="site"><a href="index.html">← Overview</a></nav>
+</header>
+
+<div class="bar" id="cfgbar">
+  <label>F <input type="number" id="cfgF" value="300" min="12" max="2000" step="1" title="input files per job"></label>
+  <label>C <input type="number" id="cfgC" value="200" min="1" max="1000" step="1" title="values per file (×1000) — scales task duration"></label>
+  <label>W <input type="number" id="cfgW" value="6" min="2" max="14" step="1" title="workers"></label>
+  <label>K <input type="number" id="cfgK" value="5" min="2" max="5" step="1" title="max fan-in (files per worker)"></label>
+  <label>Speeds
+    <select id="cfgHet">
+      <option value="uniform">uniform</option>
+      <option value="mild">heterogeneous (0.6–1.5×)</option>
+      <option value="extreme" selected>one 5× straggler</option>
+    </select>
+  </label>
+  <label><input type="checkbox" id="cfgDrain" checked> drain-mode fan-in (D3)</label>
+  <label>Sim speed
+    <select id="cfgSpeed">
+      <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="3">3×</option><option value="8">8×</option>
+    </select>
+  </label>
+  <button class="primary" id="btnRun">Run</button>
+  <button id="btnReset">Reset</button>
+  <button class="danger" id="btnKill" disabled title="Crash a random busy worker (DM-006: lease expires, task requeued)">Kill a worker</button>
+</div>
+
+<nav role="tablist" id="tabs">
+  <button role="tab" aria-selected="true"  data-tab="problem">Problem</button>
+  <button role="tab" aria-selected="false" data-tab="topology">Topology · DM-001</button>
+  <button role="tab" aria-selected="false" data-tab="sched">Scheduling · DM-002/006</button>
+  <button role="tab" aria-selected="false" data-tab="fair">Fairness · DM-007</button>
+</nav>
+
+<main>
+  <section class="panel" id="tab-problem">
+    <div class="prose">
+      <h2>The request (from the interview prompt)</h2>
+      <p>Design a system that assigns a large job across a fleet of workers and aggregates
+      their outputs into one result: the <b>index-wise mean of F pre-existing weight files</b>,
+      each of <b>C</b> values — model-weight vectors that already sit at node-owned S3 URIs,
+      from a federated-learning aggregation setting (1 &lt; F &lt; 100k, 1 &lt; C &lt; 1,000k).
+      The system ingests the submitted <code>inputUris[]</code> (F is its length) and
+      <b>never generates data</b>. Constraints: a worker may hold at most
+      <b>5 files at a time</b>; workers run at <b>different speeds</b> — minimize idling;
+      jobs with F &gt; 5 must be split into multiple queue items; <b>multiple jobs</b> run
+      concurrently; the system must decide <b>when a job is finished</b>.
+      Bonus: worker count W configurable via API, and a live UI of system state.</p>
+      <h2>What this lab shows</h2>
+      <table>
+        <tr><th>Tab</th><th>Race</th><th>Decision record</th></tr>
+        <tr><td>Topology</td><td>Eager 5-ary tree vs fixed tree vs barrier vs central accumulator</td><td>DM-001, DM-002, DM-003</td></tr>
+        <tr><td>Scheduling</td><td>Pull-based claiming vs push (static assignment); crash a worker to watch lease recovery</td><td>DM-002, DM-006</td></tr>
+        <tr><td>Fairness</td><td>FIFO vs least-in-flight claim ordering, big job + small job</td><td>DM-007</td></tr>
+      </table>
+      <p>Every lane runs the <em>same</em> job with the <em>same</em> worker speed profile and RNG seed
+      — only the decision under test differs. Each lane is a Gantt strip: one row per worker,
+      time flowing right, colored by task type. <b>Gaps are idle time</b> — the thing DM-002
+      exists to eliminate. Progress bars use DM-009's monotone file-coverage metric, so they
+      never move backwards. The log narrates pairing decisions, lease expiries, and each lane's
+      completion proof (<code>count == F</code>).</p>
+      <p>Parameters map to the prompt: <b>F</b> is the number of pre-existing input URIs and
+      <b>C</b> the values per file — the user's job inputs. Because the inputs already exist,
+      all <code>⌈F/K⌉</code> map tasks are created in the submit transaction and are
+      <b>eligible at t=0</b>: there is no generate phase gating the start, so the first tick of
+      every lane is already saturated with real work. W is the (bonus) configurable fleet size;
+      K is the RAM constraint; the speed profile exercises the "different speeds" clause;
+      drain-mode off shows why adaptive fan-in exists — the strict-5 variant <em>deadlocks</em>
+      in the tail and the lane is flagged STUCK.</p>
+    </div>
+  </section>
+
+  <section class="panel" id="tab-topology" hidden>
+    <div class="legend" id="legend-topology"></div>
+    <div class="lanes" id="lanes-topology"></div>
+    <div class="logwrap"><h4>Event log</h4><div class="log mono" id="log-topology" aria-label="event log, table view of the simulation"></div></div>
+  </section>
+
+  <section class="panel" id="tab-sched" hidden>
+    <div class="legend" id="legend-sched"></div>
+    <div class="lanes" id="lanes-sched"></div>
+    <div class="logwrap"><h4>Event log</h4><div class="log mono" id="log-sched"></div></div>
+  </section>
+
+  <section class="panel" id="tab-fair" hidden>
+    <div class="legend" id="legend-fair"></div>
+    <div class="lanes" id="lanes-fair"></div>
+    <div class="logwrap"><h4>Event log</h4><div class="log mono" id="log-fair"></div></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+/* ---------------- RNG (deterministic across lanes) ---------------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+
+/* ---------------- config ---------------- */
+const $ = id => document.getElementById(id);
+function readCfg(){
+  return {
+    F: clamp(+$('cfgF').value||300, 12, 2000),
+    C: clamp(+$('cfgC').value||200, 1, 1000),
+    W: clamp(+$('cfgW').value||6, 2, 14),
+    K: clamp(+$('cfgK').value||5, 2, 5),
+    het: $('cfgHet').value,
+    drain: $('cfgDrain').checked,
+    seed: 1337,
+  };
+}
+function clamp(v,a,b){ return Math.min(b, Math.max(a, v)); }
+function speeds(cfg){
+  const r = mulberry32(cfg.seed*7+1);
+  const out = [];
+  for(let i=0;i<cfg.W;i++){
+    if(cfg.het==='uniform') out.push(1);
+    else if(cfg.het==='mild') out.push(0.6 + r()*0.9);
+    else out.push(i===0 ? 0.2 : 0.8 + r()*0.4);   // worker 0 is the 5× straggler
+  }
+  return out;
+}
+/* task durations in ticks — scale with files touched × C */
+function durs(cfg){
+  const u = 0.35 + cfg.C/450;           // per-file unit cost
+  return {
+    map:  k => k*u,                     // read k pre-existing files, sum
+    red:  k => k*u*0.85,                // read k partials, add
+    fin:  () => u*1.2,
+    ingest: () => u*0.9,                // central aggregator: serial per-partial ingest
+  };
+}
+const LEASE = 14;
+
+/* ---------------- simulation engine ----------------
+   modes: 'eager' | 'fixed' | 'barrier' | 'central'
+   assign: 'pull' | 'push'   order: 'fifo' | 'fair'                     */
+class Sim {
+  constructor(cfg, opts, jobs, logFn){
+    this.cfg = cfg; this.o = opts; this.log = logFn;
+    this.d = durs(cfg);
+    this.t = 0; this.done = false; this.stuck = false;
+    this.rng = mulberry32(cfg.seed);
+    this.speeds = speeds(cfg);
+    this.workers = this.speeds.map((s,i)=>({id:i, speed:s, alive:true, task:null}));
+    this.segs = [];                       // {w,start,end,type} for the Gantt
+    this.pending = []; this.tasks = []; this.expiring = [];
+    this.jobs = jobs.map(j => ({...j, mapped:0, consumed:0, doneAt:null,
+      Rest: Math.ceil(j.F/4), partials:[], finalized:false, submitted:false,
+      mapsLeft:0, barrierOpen: opts.mode!=='barrier'}));
+    this.agg = opts.mode==='central' ? {busyUntil:0, queue:[], count:0, seg:[]} : null;
+    this.idleTicks = 0; this.rrNext = 0;
+  }
+  addTask(job, type, payload, dur){
+    const task = {id:this.tasks.length, job, type, payload, dur, state:'pending',
+                  owner: this.o.assign==='push' ? this.aliveRRIdx() : null,
+                  created:this.t};
+    this.tasks.push(task); this.pending.push(task);
+    return task;
+  }
+  aliveRRIdx(){ // round-robin over alive workers only
+    const alive=this.workers.filter(w=>w.alive);
+    return alive[(this.rrNext++) % alive.length].id;
+  }
+  submit(job){
+    job.submitted = true;
+    const K = this.cfg.K;
+    // Inputs pre-exist at node-owned URIs: every map task is created in the submit
+    // transaction (T1) and is therefore eligible at t=0. No generation task exists.
+    const totalMaps = Math.ceil(job.F / K);
+    job.mapsLeft = totalMaps; job.totalMaps = totalMaps;
+    if(this.o.mode==='fixed') this.buildTree(job);
+    let left = job.F, leaf = 0;
+    while(left>0){
+      const k = Math.min(K, left); left -= k;
+      this.addTask(job,'map',{k, leaf},this.d.map(k)); leaf++;
+    }
+    this.log(`job ${job.name}: submitted (F=${job.F} pre-existing files → ${totalMaps} map tasks, all eligible at t=0)`, '');
+  }
+  buildTree(job){ // fixed K-ary tree over leaf indices
+    const K=this.cfg.K; let level = Array.from({length: job.totalMaps}, (_,i)=>({done:false}));
+    job.leaves = level; job.treeNodes = [];
+    while(level.length>1){
+      const next=[];
+      for(let i=0;i<level.length;i+=K){
+        const kids = level.slice(i,i+K);
+        const node = {kids, done:false, queued:false};
+        kids.forEach(k=>k.parent=node); next.push(node); job.treeNodes.push(node);
+      }
+      level = next;
+    }
+    job.root = level[0];
+  }
+  inFlight(job){ return this.tasks.filter(t=>t.job===job && (t.state==='pending'||t.state==='running')).length; }
+  pickTask(worker){
+    let cand = this.pending.filter(t => this.o.assign==='pull' || t.owner===worker.id);
+    if(!cand.length) return null;
+    const prio = {fin:0, red:1, map:2};
+    if(this.o.order==='fair'){
+      const infl = new Map();
+      cand.forEach(t=>{ if(!infl.has(t.job)) infl.set(t.job, this.tasks.filter(x=>x.job===t.job&&x.state==='running').length); });
+      cand.sort((a,b)=> (infl.get(a.job)-infl.get(b.job)) || (prio[a.type]-prio[b.type]) || (a.created-b.created));
+    } else {
+      cand.sort((a,b)=> (a.created-b.created) || (prio[a.type]-prio[b.type]));
+    }
+    return cand[0];
+  }
+  commit(task, worker){
+    task.state='done';
+    const job = task.job, K=this.cfg.K;
+    if(task.type==='map'){
+      job.mapped += task.payload.k; job.mapsLeft--;
+      const p = {count: task.payload.k, leafIdx: task.payload.leaf};
+      job.partials.push(p);
+      this.log(`${job.name} w${worker.id}: map done → partial(n=${task.payload.k})`, '');
+      this.afterPartial(job, p);
+      if(this.o.mode==='barrier' && !job.barrierOpen && job.mapsLeft===0){
+        job.barrierOpen=true;
+        this.log(`${job.name}: BARRIER lifts — all maps done, reduce phase begins`, 'warn');
+        this.pairEager(job);
+      }
+    }
+    if(task.type==='red'){
+      const n = task.payload.n;
+      job.consumed += task.payload.fanin;
+      const p = {count:n, node: task.payload.node};
+      if(task.payload.node) task.payload.node.done=true;
+      job.partials.push(p);
+      this.log(`${job.name} w${worker.id}: reduce(fan-in ${task.payload.fanin}) → partial(n=${n})`, '');
+      this.afterPartial(job, p);
+    }
+    if(task.type==='fin'){
+      job.finalized = true; job.doneAt = this.t;
+      this.log(`${job.name}: FINALIZE — Σ/F written. count==F proof held. t=${this.t.toFixed(0)}`, 'good');
+    }
+  }
+  afterPartial(job, p){
+    if(this.o.mode==='central'){
+      this.agg.queue.push(p); return;
+    }
+    if(this.o.mode==='fixed'){
+      if(p.leafIdx!==undefined) job.leaves[p.leafIdx].done=true;
+      // a fixed-tree node becomes eligible only when ALL its named children are done
+      const scan = node => {
+        if(!node || node.queued || node.done) return;
+        if(node.kids.every(k=>k.done)){
+          node.queued=true;
+          this.addTask(job,'red',{fanin:node.kids.length, n:this.subtreeCount(job,node), node},this.d.red(node.kids.length));
+        }
+      };
+      if(p.leafIdx!==undefined) scan(job.leaves[p.leafIdx].parent);
+      if(p.node) scan(p.node.parent);
+      if(job.root && job.root.done && !job.finTask){ job.finTask=this.addTask(job,'fin',{},this.d.fin()); }
+      return;
+    }
+    // eager & barrier(after lift): pair whatever is ready
+    if(this.o.mode!=='barrier' || job.barrierOpen) this.pairEager(job);
+  }
+  subtreeCount(job,node){ // files covered by a fixed-tree node
+    const count = n => n.kids ? n.kids.reduce((s,k)=>s+count(k),0)
+                              : Math.min(this.cfg.K, job.F - job.leaves.indexOf(n)*this.cfg.K);
+    return count(node);
+  }
+  pairEager(job){
+    const K=this.cfg.K;
+    for(;;){
+      const avail = job.partials;
+      if(avail.length>=K){
+        const take = avail.splice(0,K);
+        this.addTask(job,'red',{fanin:K, n:take.reduce((s,p)=>s+p.count,0)},this.d.red(K));
+        this.log(`${job.name}: eager pairing — 5 partials → reduce enqueued`, '');
+        continue;
+      }
+      const others = this.inFlight(job);
+      if(avail.length===1 && avail[0].count===job.F && others===0 && !job.finTask){
+        job.finTask=this.addTask(job,'fin',{},this.d.fin());
+        this.log(`${job.name}: lone partial has count==F → finalize (DM-003 proof)`, 'good');
+      } else if(avail.length>=2 && others===0){
+        if(this.cfg.drain){
+          const take = avail.splice(0,avail.length);
+          this.addTask(job,'red',{fanin:take.length, n:take.reduce((s,p)=>s+p.count,0)},this.d.red(take.length));
+          this.log(`${job.name}: DRAIN MODE — fan-in ${take.length} (<${K}) to avoid tail stall`, 'warn');
+          continue;
+        } else if(!job.stuckLogged){
+          job.stuckLogged = true; this.stuck = true;
+          this.log(`${job.name}: STUCK — ${avail.length} partials < K=${K}, no tasks in flight, drain mode OFF. The 5th partial will never come.`, 'crit');
+        }
+      }
+      break;
+    }
+  }
+  killRandom(){
+    const busy = this.workers.filter(w=>w.alive && w.task);
+    if(!busy.length) return false;
+    const w = busy[(this.rng()*busy.length)|0];
+    w.alive=false;
+    const task=w.task;
+    task.expireAt = this.t + LEASE;
+    this.expiring.push(task);
+    this.log(`w${w.id} CRASHED holding ${task.type} — lease expires at t=${task.expireAt.toFixed(0)} (DM-006)`, 'crit');
+    if(this.o.assign==='push'){
+      // push pathology: pending work statically assigned to the corpse sits stranded
+      const stranded = this.pending.filter(t=>t.owner===w.id);
+      stranded.forEach(t=>{ t.expireAt=this.t+LEASE; this.expiring.push(t); });
+      if(stranded.length) this.log(`PUSH pathology: ${stranded.length} pending tasks stranded on dead w${w.id} until the reaper reassigns them`, 'warn');
+    }
+    return true;
+  }
+  step(dt){
+    if(this.done||this.stuck) return;
+    this.t += dt;
+    // lease reaper
+    for(const task of this.expiring.slice()){
+      if(this.t>=task.expireAt){
+        if(task.state==='running'){
+          task.state='pending'; task.progress=0; task.owner = this.o.assign==='push' ? this.aliveRRIdx() : null;
+          this.pending.push(task);
+          this.segs.push({w:task.w, start:task.start, end:this.t, type:'expired'});
+          this.log(`reaper: lease expired → ${task.type} requeued (attempt 2, idempotent key overwrites)`, 'warn');
+        } else if(task.state==='pending' && task.owner!==null && !this.workers[task.owner].alive){
+          task.owner = this.aliveRRIdx();
+          this.log(`reaper: reassigned stranded ${task.type} from dead worker to w${task.owner}`, 'warn');
+        }
+        this.expiring.splice(this.expiring.indexOf(task),1);
+      }
+    }
+    // running tasks advance
+    for(const w of this.workers){
+      if(!w.alive){ continue; }
+      if(w.task){
+        const task=w.task;
+        task.progress += dt*w.speed;
+        if(task.progress>=task.dur){
+          this.segs.push({w:w.id, start:task.start, end:this.t, type:task.type});
+          w.task=null; this.commit(task,w);
+        }
+      }
+      if(!w.task){
+        const task=this.pickTask(w);
+        if(task){
+          this.pending.splice(this.pending.indexOf(task),1);
+          task.state='running'; task.progress=0; task.start=this.t; task.w=w.id; w.task=task;
+        } else this.idleTicks += dt;
+      }
+    }
+    // central aggregator (serial — the NIC floor)
+    if(this.agg){
+      const job=this.jobs[0];
+      if(this.agg.busyUntil<=this.t && this.agg.queue.length){
+        const p=this.agg.queue.shift();
+        this.agg.busyUntil=this.t+this.d.ingest();
+        this.agg.count+=p.count; job.consumed+=1;
+        this.agg.seg.push({start:this.t,end:this.agg.busyUntil});
+        if(this.agg.count===job.F && !job.finalized){
+          job.finalized=true; job.doneAt=this.agg.busyUntil;
+          this.log(`${job.name}: central accumulator reached count==F at t=${job.doneAt.toFixed(0)} (all 160GB-equivalent through ONE node)`, 'good');
+        }
+      }
+    }
+    if(this.jobs.every(j=>j.finalized)){ this.done=true; }
+  }
+  progress(job){
+    const p=(job.mapped+job.consumed)/(job.F+job.Rest);
+    return job.finalized?1:Math.min(.99,p);
+  }
+  utilization(){
+    const alive = this.workers.filter(w=>w.alive).length || 1;
+    return this.t>0 ? 1-(this.idleTicks/(alive*this.t)) : 1;
+  }
+}
+
+/* ---------------- lanes, drawing, tabs ---------------- */
+const COLORS = () => {
+  const cs=getComputedStyle(document.documentElement);
+  return {map:cs.getPropertyValue('--c-map'),
+          red:cs.getPropertyValue('--c-red'), fin:cs.getPropertyValue('--c-fin'),
+          expired:cs.getPropertyValue('--s-warn'), grid:cs.getPropertyValue('--grid'),
+          dead:cs.getPropertyValue('--s-crit'), surface:cs.getPropertyValue('--surface')};
+};
+function drawGantt(cv, sim, tShared){
+  const dpr=devicePixelRatio||1, Wpx=cv.clientWidth, rows=sim.workers.length+(sim.agg?1:0);
+  const rowH=16, Hpx=rows*rowH+8;
+  if(cv.width!==Wpx*dpr||cv.height!==Hpx*dpr){ cv.width=Wpx*dpr; cv.height=Hpx*dpr; cv.style.height=Hpx+'px'; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  const col=COLORS(); ctx.clearRect(0,0,Wpx,Hpx);
+  const tMax=Math.max(tShared||sim.t,1), x=t=>4+(Wpx-8)*t/tMax;
+  for(let r=0;r<rows;r++){ ctx.fillStyle=col.grid; ctx.fillRect(4,6+r*rowH+11,Wpx-8,1); }
+  for(const s of sim.segs){
+    ctx.fillStyle=col[s.type]||col.grid;
+    const x0=x(s.start), x1=Math.max(x(s.end),x0+1.5);
+    roundRect(ctx,x0,6+s.w*rowH,x1-x0,10,2); ctx.fill();
+  }
+  for(const w of sim.workers){
+    if(w.task){ ctx.fillStyle=col[w.task.type]; const x0=x(w.task.start),x1=Math.max(x(sim.t),x0+1.5);
+      roundRect(ctx,x0,6+w.id*rowH,x1-x0,10,2); ctx.fill(); }
+    if(!w.alive){ ctx.fillStyle=col.dead; ctx.fillRect(0,6+w.id*rowH+3,3,4); }
+  }
+  if(sim.agg){
+    const r=rows-1;
+    for(const s of sim.agg.seg){ ctx.fillStyle=col.fin; const x0=x(s.start),x1=Math.max(x(Math.min(s.end,sim.t)),x0+1.5);
+      roundRect(ctx,x0,6+r*rowH,x1-x0,10,2); ctx.fill(); }
+  }
+}
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function legendHtml(extra){
+  const items=[['--c-map','Map'],['--c-red','Reduce'],['--c-fin','Finalize'],
+               ['--grid','Idle (gap)'],['--s-warn','⚠ Lease expired → requeued'],['--s-crit','✖ Dead worker']];
+  return items.map(([v,l])=>`<span><i class="sw" style="background:var(${v})"></i>${l}</span>`).join('')+(extra||'');
+}
+
+const TABS = {
+  topology: {
+    lanes: cfg => [
+      {key:'eager', name:'Eager 5-ary tree', chip:['ok','CHOSEN · DM-001'], why:'reduces overlap maps; any partials pair', opts:{mode:'eager',assign:'pull',order:'fair'}},
+      {key:'fixed', name:'Fixed reduction tree', chip:['bad','REJECTED'], why:'a slow child stalls its named parent branch', opts:{mode:'fixed',assign:'pull',order:'fair'}},
+      {key:'barrier', name:'Two-phase barrier', chip:['bad','REJECTED'], why:'slowest map gates ALL reduce work', opts:{mode:'barrier',assign:'pull',order:'fair'}},
+      {key:'central', name:'Central accumulator', chip:['bad','REJECTED'], why:'serial ingest = NIC floor (bottom row is the one node)', opts:{mode:'central',assign:'pull',order:'fair'}},
+    ],
+    jobs: cfg => [{name:'J1', F:cfg.F, at:0}],
+  },
+  sched: {
+    lanes: cfg => [
+      {key:'pull', name:'Pull-based claiming', chip:['ok','CHOSEN · DM-002'], why:'a slow worker\'s blast radius = 1 task', opts:{mode:'eager',assign:'pull',order:'fair'}},
+      {key:'push', name:'Push (static round-robin assignment)', chip:['bad','REJECTED'], why:'work stranded behind slow/dead workers', opts:{mode:'eager',assign:'push',order:'fair'}},
+    ],
+    jobs: cfg => [{name:'J1', F:cfg.F, at:0}],
+  },
+  fair: {
+    lanes: cfg => [
+      {key:'fair', name:'Least-in-flight claim ordering', chip:['ok','CHOSEN · DM-007'], why:'small job finishes in ~its own work time', opts:{mode:'eager',assign:'pull',order:'fair'}},
+      {key:'fifo', name:'Strict FIFO', chip:['bad','REJECTED'], why:'25k-task convoy starves the 3-task job', opts:{mode:'eager',assign:'pull',order:'fifo'}},
+    ],
+    jobs: cfg => [{name:'BIG', F:cfg.F, at:0},{name:'small', F:Math.max(12,Math.round(cfg.F/20)), at: 6}],
+  },
+};
+
+let state = {tab:'problem', races:{}, running:false, raf:null, last:0};
+
+function buildTab(tab){
+  const cfg=readCfg(), def=TABS[tab]; if(!def) return;
+  $(`legend-${tab}`).innerHTML = legendHtml();
+  const logEl=$(`log-${tab}`); logEl.innerHTML='';
+  const logFn=lane=>(msg,cls)=>{
+    const div=document.createElement('div');
+    div.innerHTML=`<span class="t">[${lane}]</span> <span class="${cls}">${msg}</span>`;
+    logEl.appendChild(div);
+    while(logEl.children.length>400) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop=logEl.scrollHeight;
+  };
+  const lanesEl=$(`lanes-${tab}`); lanesEl.innerHTML='';
+  const sims=[];
+  for(const L of def.lanes(cfg)){
+    const jobs=def.jobs(cfg);
+    const sim=new Sim(cfg, L.opts, jobs, logFn(L.key));
+    sim.jobs.forEach(j=>{ if(j.at===0) sim.submit(j); });
+    const el=document.createElement('div');
+    el.className='lane'+(L.chip[0]==='ok'?' chosen':'');
+    el.innerHTML=`<div class="lane-head"><h3>${L.name}</h3><span class="chip ${L.chip[0]}">${L.chip[1]}</span><span class="why">${L.why}</span></div>
+      <canvas class="gantt" aria-label="worker Gantt for ${L.name}"></canvas>
+      <div class="stats"></div>`;
+    lanesEl.appendChild(el);
+    sims.push({sim, L, cv:el.querySelector('canvas'), stats:el.querySelector('.stats'), el});
+  }
+  state.races[tab]={sims, cfg, finished:[]};
+}
+function renderLane(r, race){
+  const {sim,L}=r;
+  const tShared = Math.max(...race.sims.map(x=>x.sim.t)); // one time scale per race
+  drawGantt(r.cv, sim, tShared);
+  const jobsHtml = sim.jobs.map(j=>{
+    const pct=(sim.progress(j)*100).toFixed(0);
+    return `<span>${j.name} <b>${pct}%</b></span><span class="pbar" role="progressbar" aria-valuenow="${pct}"><div style="width:${pct}%"></div></span>`
+      + (j.doneAt?`<span class="finish">✓ t=${j.doneAt.toFixed(0)}</span>`:'');
+  }).join('');
+  const badge = sim.stuck?`<span class="chip bad">STUCK — drain mode off</span>`
+    : sim.done?`<span class="chip ok">FINISHED t=${Math.max(...sim.jobs.map(j=>j.doneAt)).toFixed(0)}</span>`:'';
+  r.stats.innerHTML = `${jobsHtml}
+    <span>util <b>${(sim.utilization()*100).toFixed(0)}%</b></span>
+    <span>queue <b>${sim.pending.length}</b></span>
+    <span>t <b>${sim.t.toFixed(0)}</b></span> ${badge}`;
+}
+function frame(ts){
+  if(!state.running) return;
+  const dt=Math.min((ts-state.last)/1000,0.1)*(+$('cfgSpeed').value)*10;
+  state.last=ts;
+  const race=state.races[state.tab];
+  if(race){
+    for(const r of race.sims){
+      // staggered job submission (fairness tab)
+      r.sim.jobs.forEach(j=>{ if(!j.submitted && r.sim.t>=j.at) r.sim.submit(j); });
+      r.sim.step(dt);
+      renderLane(r, race);
+    }
+    if(race.sims.every(r=>r.sim.done||r.sim.stuck)){
+      race.done=true;
+      state.running=false; $('btnRun').textContent='Run'; $('btnKill').disabled=true;
+      const ranked=[...race.sims].filter(r=>r.sim.done)
+        .sort((a,b)=>Math.max(...a.sim.jobs.map(j=>j.doneAt))-Math.max(...b.sim.jobs.map(j=>j.doneAt)));
+      if(ranked.length) ranked[0].sim.log(`🏁 winner: ${ranked[0].L.name}`, 'good');
+      return;
+    }
+  }
+  state.raf=requestAnimationFrame(frame);
+}
+/* ---------------- controls ---------------- */
+$('btnRun').onclick=()=>{
+  if(state.tab==='problem') return;
+  if(!state.races[state.tab] || state.races[state.tab].done) buildTab(state.tab);
+  if(state.running){ state.running=false; $('btnRun').textContent='Run'; $('btnKill').disabled=true; }
+  else { state.running=true; $('btnRun').textContent='Pause'; $('btnKill').disabled=false;
+         state.last=performance.now(); state.raf=requestAnimationFrame(frame); }
+};
+$('btnReset').onclick=()=>{ state.running=false; $('btnRun').textContent='Run'; $('btnKill').disabled=true; if(state.tab!=='problem') buildTab(state.tab); };
+$('btnKill').onclick=()=>{
+  const race=state.races[state.tab]; if(!race) return;
+  race.sims.forEach(r=>r.sim.killRandom());
+};
+for(const el of ['cfgF','cfgC','cfgW','cfgK','cfgHet','cfgDrain'].map($))
+  el.addEventListener('change',()=>{ state.running=false; $('btnRun').textContent='Run'; if(state.tab!=='problem') buildTab(state.tab); });
+document.querySelectorAll('[role=tab]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('[role=tab]').forEach(x=>x.setAttribute('aria-selected', x===b));
+  document.querySelectorAll('main > section').forEach(s=>s.hidden=true);
+  state.tab=b.dataset.tab; $(`tab-${state.tab}`).hidden=false;
+  state.running=false; $('btnRun').textContent='Run'; $('btnKill').disabled=true;
+  if(state.tab!=='problem' && !state.races[state.tab]) buildTab(state.tab);
+  if(state.tab!=='problem') state.races[state.tab].sims.forEach(r=>renderLane(r, state.races[state.tab]));
+});
+</script>
+</body>
+</html>

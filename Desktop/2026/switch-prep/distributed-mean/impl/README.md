@@ -6,8 +6,12 @@ Postgres 16 (state + queue), MinIO (S3 API), Python 3.12 workers, supervisor
 
 ## Quick start
 
+Prerequisites: Docker (with compose), Python 3.12+, make. Nothing else — every
+service runs in containers; the venv is only for the seed harness and tests.
+
 ```bash
 cd impl
+make setup             # one-time: venv for harness + tests
 make up                # build + start: postgres, minio, api, 4 workers, supervisor, ui
 make demo-example      # the brief's example: [1,2,3]+[4,5,6] → 2.5, 3.5, 4.5
 make demo F=1000 C=100000   # the standard demo job (~2–3 min at W=4)

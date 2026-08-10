@@ -302,6 +302,45 @@ a progress-estimation problem our task shape does not support.
 
 ---
 
+## Appendix — the chunk-size choice, derived
+
+The fixed 5-file map chunk can be derived rather than asserted. Framed as Q||C_max
+(makespan on uniformly-related machines, solved greedily online by the pull queue),
+the only free knob is chunk size c, pulled on by two forces:
+
+- **Per-task overhead is O(C), not O(1).** Every task emits a full C-length partial
+  (8 MB at C = 10⁶) regardless of how many files it consumed — plus a claim, a commit,
+  and an ack. So overhead o ≈ α·C is *constant in c*, and the overhead ratio o/(c·p)
+  falls as 1/c: bigger chunks buy real throughput.
+- **The straggler tail.** The slowest worker may claim a chunk near the end, putting
+  c·p_slowest on the critical path: c ≤ T*/p_slowest, where T* = F/Σ(1/pᵢ) is the
+  fluid lower bound.
+
+Balancing the two (homogeneous case) gives the EOQ-shaped square-root rule
+
+    c* = √( F·o / (α·W·p) ) ,   oversubscription K* = N*/W = √((F/W)·(p/o)).
+
+Evaluated at this system's envelope: reading a file (~8 MB) costs about the same as
+emitting a partial (~8 MB), so p/o ≈ 1, and at F = 10⁵, W = 100: c* ≈ 32 — clamped by
+the RAM cap to **5**. For every realistic job (F ≥ ~5W) the cap binds, c = 5 is
+optimal, and oversubscription K = F/(5W) ≫ 1 provides the load balancing for free.
+
+Two facts worth carrying:
+
+1. **The risk curve is asymmetric.** Undershooting c costs a few percent of makespan;
+   overshooting costs 50–150% (a slow worker holding an oversized chunk). When in
+   doubt, round down.
+2. **The small-F regime (F < ~5W) is where the derivation matters.** There the
+   straggler ceiling binds: c = clamp(⌈T*/p_slowest⌉, 1, 5), or better, tapered
+   speed-proportional dispatch (guided/factoring-style, sizes shrinking with remaining
+   work, per-worker speed as an EWMA from a probe pass). Deliberately not built:
+   tapering with *unknown* speeds gambles the first dispatch — a slow worker grabbing
+   the big opening chunk is the 150% case — whereas pull at fixed c never risks more
+   than one chunk. Documented as the small-job evolution, with the ceiling rule as
+   its trigger.
+
+---
+
 ## Success Metrics
 
 | Checkpoint | Target | How measured |

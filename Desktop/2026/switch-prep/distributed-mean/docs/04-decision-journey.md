@@ -189,7 +189,7 @@ ALB** — a configuration change, not a rewrite. [HLD §6](02-hld.md) *(no conte
 - **`LISTEN/NOTIFY` wake-up** — if the 500 ms idle poll's claim latency matters: drop-in. [DM-004](itds/DM-004-queue-technology.md)
 - **SQS + transactional outbox** — at sustained > 5k tasks/s, cross-region consumers, or multi-service fan-out; behind the existing `QueueAdapter`. [DM-004](itds/DM-004-queue-technology.md)
 - **PgBouncer** — as W approaches the hundreds. [DM-004](itds/DM-004-queue-technology.md)
-- **In-worker pre-combining** — if intermediate I/O > ~40% of wall-clock: combine locally before writing, level-0 traffic 160 → ~32 GB. [DM-001](itds/DM-001-aggregation-topology.md)
+- **In-worker pre-combining** — if intermediate I/O > ~40% of wall-clock: combine locally before writing, with flush boundaries aligned to task boundaries (a cross-task accumulator would break per-task retry idempotency), level-0 traffic 160 → ~32 GB. [DM-001](itds/DM-001-aggregation-topology.md)
 - **Column-block streaming within tasks** — if C grows past ~10⁸ (vector > worker RAM); topology unchanged. [DM-001](itds/DM-001-aggregation-topology.md)
 - **Deterministic tree** — if bit-identical outputs become required: canonical pairing order, drain off; tail latency rises. [DM-010](itds/DM-010-numerical-correctness.md)
 - **Kahan/compensated summation** — if incoming weight magnitudes widen; doubles partial size and level-0 traffic. [DM-010](itds/DM-010-numerical-correctness.md)

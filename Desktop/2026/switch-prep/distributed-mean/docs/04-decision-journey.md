@@ -184,6 +184,7 @@ ALB** — a configuration change, not a rewrite. [HLD §6](02-hld.md) *(no conte
 
 ### Deferred, with triggers
 
+- **Adaptive chunk sizing for small-F jobs** — trigger: F < ~5·W, where a fixed 5-file chunk lets one slow worker's last chunk set the makespan; mechanism: straggler ceiling c ≤ T*/p_slowest with tapered dispatch (at F ≥ 5W the RAM cap binds and c = 5 is optimal — the risk curve is asymmetric, so round down). [DM-002](itds/DM-002-work-distribution-stragglers.md)
 - **Speculative tail re-execution** — if p99 completion > 1.5× throughput projection: duplicate the projected-last tasks, first commit wins (idempotency makes it safe). [DM-002](itds/DM-002-work-distribution-stragglers.md)
 - **`LISTEN/NOTIFY` wake-up** — if the 500 ms idle poll's claim latency matters: drop-in. [DM-004](itds/DM-004-queue-technology.md)
 - **SQS + transactional outbox** — at sustained > 5k tasks/s, cross-region consumers, or multi-service fan-out; behind the existing `QueueAdapter`. [DM-004](itds/DM-004-queue-technology.md)

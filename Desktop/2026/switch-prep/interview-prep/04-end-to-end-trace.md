@@ -240,6 +240,158 @@ touches the bytes. (`?inline=1` would proxy instead, for curl.) Body:
 R1 done, FZ done. partials: P1,P2 consumed_by=R1; P3 unconsumed (the root — GC'd with
 the objects later). One worker died mid-job; the answer is exact.
 
+---
+
+# Part 2 — The fork points: every edge case, anchored to its step
+
+The spine above is the story you *tell*; these forks are the answers to "okay, but
+what if — right there — X happened instead?" Each is anchored to the step where the
+interviewer would interrupt.
+
+## Fork @ Step 2 — hostile submissions (the front door)
+
+- **Duplicate URI** in the list → 422 immediately. Why it matters: a repeated file
+  would be counted twice and silently skew the mean — this is a *correctness* check
+  wearing a validation costume.
+- **URI outside the allow-list** (`s3://evil-bucket/…`) → 422 naming the offender.
+  Caller-supplied URIs are an SSRF vector; the allow-list is checked here AND again
+  by the worker at read time (the object behind a URI can change between checks).
+- **F×C×8 over the size cap** → 413. **A ninth active job** → 429 with Retry-After.
+  Both checked *before* any write — a rejected job leaves zero residue.
+- **The same POST retried** (network blip, client retry) with an `Idempotency-Key`
+  header → the transaction finds the existing key and returns **200 with the
+  original jobId** — no twin job, no duplicate work. Without the header, a duplicate
+  is a distinct job *by design* (two users may legitimately want the same mean).
+- **Deliberately NOT checked: object existence.** That would be F round-trips on the
+  submit path — the exact serialize-everything-through-one-node sin the design
+  exists to avoid. Missing files are a runtime failure with retries (next fork).
+
+## Fork @ Step 7 — a bad input (file 3 is missing, or has 5 values instead of 4)
+
+The GET 404s (bounded timeouts: 5 s connect / 30 s read — a hung store fails the
+task rather than hanging the worker), or the length check fails. The executor raises
+an error **naming the URI**. The failure path (T4) is fenced exactly like a commit:
+
+```sql
+UPDATE tasks SET status='pending', worker_id=NULL, lease_token=NULL,
+  last_error='PermanentInputError: s3://…/3.csv: declared C=4 but file has 5 values'
+WHERE id='M1' AND lease_token='tok-A' AND status='claimed';
+```
+
+Requeue IS the retry — attempts were already charged at claim. Attempts 2 and 3 hit
+the same wall (a missing file doesn't come back), the third flips the task to
+**dead**, and the reaper fails the job loudly, the offending URI preserved in
+`last_error` and surfaced in `GET /jobs/:id`. The mean is never computed from
+partial data — the job fails *honestly* instead of answering *wrongly*.
+
+## Fork @ Step 6 — the wedged-but-heartbeating worker
+
+Nastier than a crash: w-fast's GET hangs indefinitely, but its heartbeat thread —
+a separate thread on a separate connection — keeps chirping "alive!" every 10 s.
+Leases alone would extend forever. Two guards close it: the heartbeat SQL itself
+refuses to extend past the absolute ceiling (`AND lease_expires_at < deadline_at`),
+and the reaper reclaims on `now() > deadline_at` regardless of heartbeats. Ceiling:
+300 s. **Liveness never depends on a worker's self-report.**
+
+## Fork @ Step 10 — the simultaneous-commit race (the deepest probe)
+
+Variant setup: both maps finish at the same instant; their T2s open concurrently.
+**Without the per-job lock** (the v1 bug, reachable at exactly this F=7/W=2 shape):
+each transaction's snapshot still shows the *other* task as claimed, and the
+row-skipping read hides the other's uncommitted partial — so worker A sees "1
+partial, work still in flight → not my problem," worker B concludes the same
+symmetrically, **both commit having merged nothing**, and since merging is only
+triggered by commits, no trigger ever fires again. Stranded forever at 99%.
+
+**With the lock:** A's pairing enters first; B's transaction *waits milliseconds* at
+`pg_advisory_xact_lock`; when A commits, B proceeds and now sees the complete
+picture — A's partial committed, A's task done, nothing in flight → **drain mode
+fires from B's own transaction**. The rule the lock enforces: *the last committer
+provably has the complete picture.* There's a two-connection test pinning exactly
+this interleaving.
+
+## Fork @ Step 5 — a second job arrives mid-run (graded: fairness)
+
+Job K (F=2, tiny) is submitted while J's tasks are mid-flight. The next free
+worker's claim orders candidates by **in-flight-tasks-per-job ascending**:
+J has 1–2 claimed, K has 0 → **K's map wins the very next claim**. K finishes in
+roughly its own ~5 s of work while J continues around it — under plain FIFO, K would
+have queued behind every remaining task of J. The big job's loss: a few
+worker-seconds, ~0.01% at scale. Fairness is one ORDER BY, not a scheduler.
+
+## Fork @ Step 5b — the operator scales the fleet (bonus 1)
+
+Mid-job: `PATCH /system/workers {"desired": 4}` → the API writes one row and
+returns. The supervisor's next 5-second pass compares desired (4) to actual (2) and
+starts two containers; they register and their first claims succeed within a second —
+no draining, no rebalancing, pull just absorbs them. Scale *down* is the polite
+version: SIGTERM → finish the task in hand → commit → deregister — and if the
+container is killed rudely anyway, the lease path (Step 13) already covers it.
+**Correctness never depends on the graceful path.**
+
+## Fork @ Step 3 — the degenerate job (F ≤ 5)
+
+F=4: T1 creates exactly ONE map task. Its commit inserts a partial with count=4=F,
+pairing finds one unconsumed partial, count equals F, nothing in flight → straight
+to the finalize CAS. **No merge ever runs; no special-case code exists** — the
+general machinery degrades to the trivial case by itself. (The brief's own F=2
+example is this fork — it's the first test in the suite.)
+
+## Fork @ Step 16 — the merge task is redelivered
+
+R1's worker stalls; the lease expires; R1 requeues; another worker runs it — while
+the original may still finish. Why nothing corrupts: R1's **input set was frozen at
+creation** (P1 and P2 were marked consumed in the transaction that created R1 —
+consumption-at-creation, not at execution), so both executions read the same two
+partials and write byte-identical bytes to the same key `…/R1.f64`. The fence lets
+exactly one commit count; the loser's late commit matches zero rows. Duplicates are
+harmless *by construction*, not by luck.
+
+## Fork @ Step 19 — the finalize itself fails
+
+S3 blips during the result PUT → T4 requeues it. Finalize gets **10 attempts** (it's
+one idempotent 8 MB read and a divide) versus 3 for everything else. And if it
+somehow died anyway: the reaper **refuses to fail a job that still holds a count=F
+partial** — it emits a `needs_finalize` alert, and the backstop can re-arm the
+finalize. Principle: *a computation that has proven itself complete is unkillable by
+retry bookkeeping.* (The v1 design discarded a finished answer here — a review catch.)
+
+## Fork @ Step 21/22 — the client-side edges
+
+- **Result requested early** → 409 with the job's current status; completion is
+  announced by the `job.completed` SSE event or polling.
+- **Dashboard disconnects and reconnects** → the browser auto-resends
+  `Last-Event-ID`; the tail resumes with `id > cursor` — and can't have skipped
+  anything, because it only ever reads events older than one second (ids are
+  assigned in order but become *visible* in commit order; the lag is the guarantee).
+- **The progress bar** never moved backwards through any of this — it's computed
+  from partial rows (state), clamped at 99%, and only the finalize writes 100%.
+
+## Coverage map — design edge-case table → where it lives here
+
+| Edge case | Where |
+|---|---|
+| F ≤ 5 / brief's F=2 example | Fork @ Step 3 |
+| F not divisible by 5 | Spine (5+2 chunks; drain merge) |
+| Drain mode / tail stall | Spine Step 16 |
+| Simultaneous last commits | Fork @ Step 10 |
+| Worker crash / lease / reaper | Spine Steps 11–14 |
+| Wedged-but-heartbeating | Fork @ Step 6 |
+| Zombie commit discarded | Spine Step 14 |
+| Redelivered merge | Fork @ Step 16 |
+| Duplicate POST / idempotency | Fork @ Step 2 |
+| Oversized / flooding / SSRF | Fork @ Step 2 |
+| Bad input URI → honest failure | Fork @ Step 7 |
+| Early result request | Fork @ Step 21 |
+| Queue quiet ≠ done | Spine Step 12 |
+| Fairness under concurrency | Fork @ Step 5 |
+| W reconfigured mid-job | Fork @ Step 5b |
+| Failing finalize / answer preservation | Fork @ Step 19 |
+| SSE resume without loss | Fork @ Step 21 |
+| Progress monotonicity | Spine + Fork @ Step 21 |
+
+---
+
 ## The trace in one breath
 
 Validate at the door → one transaction births the job and all its maps → workers

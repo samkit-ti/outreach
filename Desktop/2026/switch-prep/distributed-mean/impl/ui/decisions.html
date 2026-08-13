@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decision Atlas — Distributed Mean</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.55 var(--sans); }
+  header { padding: 22px 24px 8px; }
+  header h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -.01em; }
+  header p  { margin: 0; color: var(--ink-2); max-width: 72ch; }
+  nav.chips { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 10px 24px; background: var(--page); border-bottom: 1px solid var(--grid); }
+  nav.chips a { font-size: 12px; padding: 3px 10px; border: 1px solid var(--grid);
+    border-radius: 999px; color: var(--ink-2); text-decoration: none; background: var(--surface); }
+  nav.chips a:hover { border-color: var(--accent); color: var(--accent); }
+  main { padding: 8px 24px 60px; max-width: 1180px; margin: 0 auto; }
+  section.dm { margin-top: 34px; }
+  section.dm > h2 { font-size: 17px; margin: 0 0 2px; }
+  section.dm > h2 .id { color: var(--muted); font: 12px var(--mono); margin-right: 8px; }
+  section.dm > p.sub { margin: 0 0 12px; color: var(--ink-2); max-width: 78ch; }
+  .alts { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .alts.compact { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .alt { border: 1px solid var(--grid); border-radius: var(--radius); background: var(--surface);
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .alt.chosen { border-color: var(--chosen-ink); }
+  .alt h3 { margin: 0; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .v { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; padding: 2px 8px; border-radius: 999px; }
+  .v.ch { background: var(--chosen-bg); color: var(--chosen-ink); }
+  .v.rj { background: color-mix(in srgb, var(--s-crit) 14%, var(--surface)); color: var(--s-crit); }
+  .v.df { background: color-mix(in srgb, var(--s-warn) 22%, var(--surface)); color: var(--ink); }
+  .why { font-size: 12.5px; color: var(--ink-2); margin: 0; }
+  .diag { background: var(--surface-2); border-radius: 7px; padding: 10px; overflow-x: auto; }
+  .diag svg { display: block; max-width: 100%; height: auto; }
+  .cap { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .cap b.bad { color: var(--s-crit); } .cap b.good { color: var(--chosen-ink); }
+  /* CSS gantt / bars */
+  .gant { display: flex; flex-direction: column; gap: 4px; min-width: 260px; }
+  .gant .row { display: flex; align-items: center; gap: 6px; }
+  .gant .who { width: 40px; font: 10.5px var(--mono); color: var(--ink-2); text-align: right; }
+  .gant .lane { flex: 1; display: flex; height: 12px; gap: 1px; }
+  .seg { border-radius: 2px; }
+  .seg.map { background: var(--c-map); } .seg.red { background: var(--c-red); }
+  .seg.fin { background: var(--c-fin); } .seg.acc { background: var(--accent); }
+  .seg.idle { background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--s-crit) 45%, transparent) 0 4px, transparent 4px 8px); }
+  .wall { width: 3px; background: var(--s-crit); border-radius: 2px; align-self: stretch; }
+  /* queue strips */
+  .qs { display: flex; gap: 3px; align-items: center; flex-wrap: wrap; }
+  .tk { font: 10px var(--mono); padding: 2px 6px; border-radius: 4px; background: var(--surface);
+    border: 1px solid var(--baseline); color: var(--ink-2); }
+  .tk.j1 { border-color: var(--c-map); color: var(--c-map); }
+  .tk.j2 { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .tk.ghost { opacity: .55; border-style: dashed; }
+  /* misc */
+  .bars { display: flex; flex-direction: column; gap: 6px; }
+  .bars .b { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--ink-2); }
+  .bars .b i { height: 12px; border-radius: 3px; display: inline-block; }
+  .flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+  .box { border: 1.5px solid var(--baseline); border-radius: 7px; padding: 6px 10px; background: var(--surface); }
+  .box.hot { border-color: var(--s-crit); color: var(--s-crit); }
+  .box.ok { border-color: var(--chosen-ink); }
+  .arr { color: var(--muted); } .arr.bad { color: var(--s-crit); font-weight: 700; }
+  .rule { font: 11.5px var(--mono); background: var(--surface); border: 1px dashed var(--baseline);
+    border-radius: 6px; padding: 6px 9px; color: var(--ink-2); }
+  footer { padding: 30px 24px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--grid); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Decision Atlas</h1>
+  <p>Every design decision, every alternative considered — drawn. The <a href="simulator.html">simulator</a>
+  shows these designs racing over time; this page shows their <em>shapes</em>: how each option moves data,
+  and where the rejected ones break (marked in red). Full arguments live in the decision records
+  (<span style="font-family:var(--mono)">docs/itds/</span>).</p>
+</header>
+
+<nav class="chips">
+  <a href="#dm001">1 · Topology</a><a href="#dm002">2 · Distribution</a><a href="#dm003">3 · Completion</a>
+  <a href="#dm004">4 · Queue</a><a href="#dm005">5 · Data</a><a href="#dm006">6 · Failure</a>
+  <a href="#dm007">7 · Fairness</a><a href="#dm008">8 · Workers</a><a href="#dm009">9 · Observability</a>
+  <a href="#dm010">10 · Numerics</a><a href="#dm011">11 · Build vs adopt</a>
+</nav>
+
+<main>
+
+<!-- ============================== DM-001 ============================== -->
+<section class="dm" id="dm001">
+<h2><span class="id">DM-001</span>Who combines 20,000 partial results into one answer?</h2>
+<p class="sub">A partial result is C numbers — the same 8&nbsp;MB object as an input file — so the
+“≤5 files at a time” limit binds combiners exactly as it binds readers.</p>
+<div class="alts">
+
+<div class="alt">
+  <h3>Central accumulator <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <svg viewBox="0 0 300 120" role="img" aria-label="star topology into one node">
+      <g fill="var(--c-map)">
+        <circle cx="20" cy="15" r="7"/><circle cx="20" cy="45" r="7"/>
+        <circle cx="20" cy="75" r="7"/><circle cx="20" cy="105" r="7"/>
+      </g>
+      <text x="38" y="64" font-size="9" fill="var(--muted)">… ×20,000 partials</text>
+      <g stroke="var(--s-crit)" stroke-width="5" opacity=".85">
+        <line x1="30" y1="15" x2="215" y2="55"/><line x1="30" y1="45" x2="215" y2="58"/>
+        <line x1="30" y1="75" x2="215" y2="62"/><line x1="30" y1="105" x2="215" y2="65"/>
+      </g>
+      <rect x="218" y="42" width="72" height="38" rx="7" fill="var(--surface)" stroke="var(--baseline)" stroke-width="1.5"/>
+      <text x="254" y="59" font-size="9.5" text-anchor="middle" fill="var(--ink)">ONE node</text>
+      <text x="254" y="72" font-size="8.5" text-anchor="middle" fill="var(--ink-2)">acc = 8 MB ✓</text>
+      <text x="120" y="105" font-size="9.5" fill="var(--s-crit)" font-weight="bold">160 GB through one NIC ≈ 21 min, serial</text>
+    </svg>
+  </div>
+  <p class="why">Memory is fine — <b>bandwidth is the objection</b>: an Amdahl floor no worker count
+  can lower. Also welds job state into one process’s RAM.</p>
+</div>
+
+<div class="alt">
+  <h3>Two-phase barrier <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div style="display:flex; gap:8px; align-items:stretch; min-width:280px">
+      <div class="gant" style="flex:1">
+        <div class="row"><span class="who">fast</span><span class="lane"><span class="seg map" style="flex:3"></span><span class="seg idle" style="flex:4"></span></span></div>
+        <div class="row"><span class="who">med</span><span class="lane"><span class="seg map" style="flex:4"></span><span class="seg idle" style="flex:3"></span></span></div>
+        <div class="row"><span class="who">slow</span><span class="lane"><span class="seg map" style="flex:7"></span></span></div>
+      </div>
+      <div class="wall" title="barrier"></div>
+      <div class="gant" style="flex:.6">
+        <div class="row"><span class="lane"><span class="seg red" style="flex:1"></span></span></div>
+        <div class="row"><span class="lane"><span class="seg red" style="flex:1"></span></span></div>
+        <div class="row"><span class="lane"><span class="seg red" style="flex:1"></span></span></div>
+      </div>
+    </div>
+    <div class="cap">map phase <b class="bad">| wall |</b> reduce phase — striped = workers idle while finished partials sit untouchable</div>
+  </div>
+  <p class="why">The slowest of 20,000 maps gates <em>all</em> merging, and 160&nbsp;GB of partials must
+  exist at once. Buys nothing: phase 2 still needs the same tree.</p>
+</div>
+
+<div class="alt">
+  <h3>Column sharding <span class="v rj">REJECTED</span><span class="v df">KEPT AS ESCAPE HATCH</span></h3>
+  <div class="diag">
+    <svg viewBox="0 0 300 110" role="img" aria-label="matrix sliced by columns">
+      <g stroke="var(--baseline)" fill="none">
+        <rect x="15" y="12" width="180" height="84" rx="4"/>
+        <line x1="15" y1="33" x2="195" y2="33"/><line x1="15" y1="54" x2="195" y2="54"/><line x1="15" y1="75" x2="195" y2="75"/>
+      </g>
+      <line x1="105" y1="8" x2="105" y2="100" stroke="var(--accent)" stroke-dasharray="4 3" stroke-width="2"/>
+      <text x="55" y="8" font-size="8.5" text-anchor="middle" fill="var(--accent)">shard 1</text>
+      <text x="152" y="8" font-size="8.5" text-anchor="middle" fill="var(--accent)">shard 2</text>
+      <text x="205" y="26" font-size="8.5" fill="var(--muted)">← each row = a file</text>
+      <text x="205" y="40" font-size="8.5" fill="var(--s-crit)" font-weight="bold">every shard still</text>
+      <text x="205" y="52" font-size="8.5" fill="var(--s-crit)" font-weight="bold">reads EVERY row:</text>
+      <text x="205" y="64" font-size="8.5" fill="var(--s-crit)" font-weight="bold">S × 800 GB</text>
+      <text x="15" y="108" font-size="9" fill="var(--ink-2)">a “column” is one number scattered across all F files</text>
+    </svg>
+  </div>
+  <p class="why">The constraint counts <em>files</em>, so slicing columns removes zero fan-in — pure added
+  cost. Becomes the right second axis only if C grows past ~10⁸ (vector &gt; worker RAM).</p>
+</div>
+
+<div class="alt">
+  <h3>Pre-planned static tree <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <svg viewBox="0 0 300 110" role="img" aria-label="wired tree with stalled branch">
+      <rect x="120" y="10" width="56" height="20" rx="5" fill="var(--surface)" stroke="var(--muted)" stroke-dasharray="3 2"/>
+      <text x="148" y="24" font-size="9" text-anchor="middle" fill="var(--muted)">R1 waiting…</text>
+      <g stroke="var(--baseline)"><line x1="135" y1="30" x2="60" y2="58"/><line x1="148" y1="30" x2="148" y2="58"/></g>
+      <line x1="161" y1="30" x2="236" y2="58" stroke="var(--s-crit)" stroke-width="2.5"/>
+      <rect x="30" y="58" width="56" height="18" rx="5" fill="var(--c-map)"/>
+      <rect x="120" y="58" width="56" height="18" rx="5" fill="var(--c-map)"/>
+      <rect x="208" y="58" width="56" height="18" rx="5" fill="var(--surface)" stroke="var(--s-crit)" stroke-width="2"/>
+      <text x="236" y="71" font-size="8.5" text-anchor="middle" fill="var(--s-crit)">slow child</text>
+      <g>
+        <rect x="30" y="88" width="120" height="16" rx="5" fill="var(--surface)" stroke="var(--chosen-ink)"/>
+        <text x="90" y="99.5" font-size="8.5" text-anchor="middle" fill="var(--chosen-ink)">ready partials — unusable: wrong names</text>
+      </g>
+    </svg>
+  </div>
+  <p class="why">Wiring merges to <em>named</em> children re-creates the barrier at every one of ~5,000 nodes.
+  Its one prize — bit-identical reruns — is preserved as an opt-in flag.</p>
+</div>
+
+<div class="alt chosen">
+  <h3>Eager 5-ary tree through the queue <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div class="qs" style="margin-bottom:8px">
+      <span class="tk j1">Σ,5</span><span class="tk j1">Σ,5</span><span class="tk j1">Σ,5</span>
+      <span class="tk j1">Σ,5</span><span class="tk j1">Σ,5</span><span class="tk">Σ,2</span>
+      <span class="arr">→ pool of partials, each tagged with its file count</span>
+    </div>
+    <div class="rule">≥5 ready → merge oldest 5 &nbsp;·&nbsp; job quiet &amp; ≥2 → drain (2–4) &nbsp;·&nbsp; single &amp; n=F → finalize</div>
+    <div class="gant" style="margin-top:8px">
+      <div class="row"><span class="who">fast</span><span class="lane"><span class="seg map" style="flex:2"></span><span class="seg map" style="flex:2"></span><span class="seg red" style="flex:1.5"></span><span class="seg fin" style="flex:1"></span></span></div>
+      <div class="row"><span class="who">slow</span><span class="lane"><span class="seg map" style="flex:6.5"></span></span></div>
+    </div>
+    <div class="cap"><b class="good">map and merge overlap — no wall anywhere;</b> a straggler delays only its own 8 MB</div>
+  </div>
+  <p class="why">Sums merge in any order, so <em>whoever committed last</em> pairs whatever is ready —
+  the tree emerges, is never stored, and completion falls out of the counts (DM-003).</p>
+</div>
+
+</div>
+</section>
+
+<!-- ============================== DM-002 ============================== -->
+<section class="dm" id="dm002">
+<h2><span class="id">DM-002</span>How does work meet workers of wildly different speeds?</h2>
+<p class="sub">The brief’s core scenario: heterogeneous workers, minimal idling.</p>
+<div class="alts">
+
+<div class="alt">
+  <h3>Push — a speed-estimating scheduler <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div class="flow" style="margin-bottom:8px">
+      <span class="box">scheduler<br><span style="font:10px var(--mono);color:var(--muted)">p̂: fast=1 &nbsp;med=2 &nbsp;<s style="color:var(--s-crit)">slow=2</s> ← stale</span></span>
+      <span class="arr">assigns shares ahead of time</span>
+    </div>
+    <div class="gant">
+      <div class="row"><span class="who">fast</span><span class="lane"><span class="seg map" style="flex:2"></span><span class="seg idle" style="flex:5"></span></span></div>
+      <div class="row"><span class="who">med</span><span class="lane"><span class="seg map" style="flex:4"></span><span class="seg idle" style="flex:3"></span></span></div>
+      <div class="row"><span class="who">slow</span><span class="lane"><span class="seg map" style="flex:7"></span></span></div>
+    </div>
+    <div class="cap"><b class="bad">forecast error = idle time</b> — one wrong estimate nearly doubles the job (16 s vs ~8 s optimum)</div>
+  </div>
+  <p class="why">Speed here is a noisy process (storage tails, cold caches, noisy neighbors) — history
+  doesn’t predict it. Push’s one prize, data locality, is recoverable later as a claim-order hint.</p>
+</div>
+
+<div class="alt chosen">
+  <h3>Pull — workers claim when free <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div class="qs" style="margin-bottom:8px">
+      <span class="tk j1">T7</span><span class="tk j1">T8</span><span class="tk j1">T9</span><span class="tk j1">T10</span>
+      <span class="arr">← one shared queue</span>
+    </div>
+    <div class="flow">
+      <span class="box ok">fast ⟲ claims ×3</span>
+      <span class="box ok">med ⟲ claims ×2</span>
+      <span class="box ok">slow ⟲ claims ×1</span>
+    </div>
+    <div class="cap"><b class="good">self-balancing with zero estimation</b> — a 3× faster worker simply asks 3× as often;
+    a straggler’s blast radius is exactly <b class="good">one task</b>, whatever F is</div>
+  </div>
+  <p class="why">Greedy pull finishes within (ideal&nbsp;+&nbsp;one task) — the penalty is a constant,
+  not a fraction of the job.</p>
+</div>
+
+<div class="alt">
+  <h3>Chunk size — why 5 files per task</h3>
+  <div class="diag">
+    <div class="bars">
+      <div class="b"><i style="width:26%; background:repeating-linear-gradient(90deg, var(--baseline) 0 5px, var(--c-map) 5px 9px)"></i>c=1 — fixed costs (8 MB partial + commit) dominate; 5× the tasks <b style="color:var(--s-crit)">✗</b></div>
+      <div class="b"><i style="width:40%; background:var(--c-map)"></i>c=5 — overhead &lt;1% of a 40 MB task <b style="color:var(--chosen-ink)">✓ (RAM cap binds here)</b></div>
+      <div class="b"><i style="width:96%; background:linear-gradient(90deg, var(--c-map) 55%, var(--s-crit) 55%)"></i>c=50 — slow worker’s one chunk sets the finish line <b style="color:var(--s-crit)">✗ + cap ✗</b></div>
+    </div>
+    <div class="cap">the formal optimum (√-rule) lands ≈32 → clamped to the cap; undershooting is cheap, overshooting is 50–150%</div>
+  </div>
+  <p class="why">Per-task cost is O(C), not O(1) — every task writes a full 8&nbsp;MB partial however
+  few files it read. Amortize it; never exceed what the slowest can finish in time.</p>
+</div>
+
+<div class="alt">
+  <h3>Drain mode — the tail patch <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div class="flow" style="margin-bottom:6px">
+      <span class="tk">Σ,5</span><span class="tk">Σ,5</span><span class="tk">Σ,2</span>
+      <span class="arr bad">→ strict “wait for 5” gate: 4th &amp; 5th never come → stuck ∞</span>
+    </div>
+    <div class="flow">
+      <span class="tk">Σ,5</span><span class="tk">Σ,5</span><span class="tk">Σ,2</span>
+      <span class="arr" style="color:var(--chosen-ink)">→ job quiet? merge all 3 → Σ,12 &nbsp;(cost: ≤ ~7 extra merges, &lt;0.15%)</span>
+    </div>
+  </div>
+  <p class="why">Fires only when nothing else is running or pending — a bounded price for removing an
+  unbounded stall. Correct at any size because partials carry counts.</p>
+</div>
+
+<div class="alt">
+  <h3>Speculative duplicates (LATE-style) <span class="v df">DEFERRED</span></h3>
+  <div class="diag">
+    <div class="flow">
+      <span class="tk j1">R-last</span><span class="arr">held by a slow-but-alive worker</span>
+      <span class="tk j1 ghost">R-last′</span><span class="arr">duplicate on a fast idle worker — first commit wins</span>
+    </div>
+    <div class="cap">already safe (deterministic keys + fenced commits) — but each duplicated leaf re-reads ~40 MB to save seconds</div>
+  </div>
+  <p class="why">The only cure for slow-but-alive — adopted if p99 makespan exceeds 1.5× the throughput
+  projection with a slow worker on the critical path. Trigger written in the record.</p>
+</div>
+
+</div>
+</section>
+
+<!-- ============================== DM-003 ============================== -->
+<section class="dm" id="dm003">
+<h2><span class="id">DM-003</span>How does the system know a job is finished?</h2>
+<p class="sub">Hard here because merge tasks are created on the fly (no known total) and the queue
+redelivers (any signal built from events can fire twice).</p>
+<div class="alts">
+
+<div class="alt">
+  <h3>Countdown counter <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div class="flow" style="font-family:var(--mono); font-size:12px">
+      <span>remaining: 2</span><span class="arr">→</span><span>1</span><span class="arr">→</span>
+      <span class="box hot">0 ← fires “done”!</span><span class="arr bad">→</span>
+      <span style="color:var(--s-crit)">1&nbsp; (the merge that commit just spawned)</span>
+    </div>
+    <div class="cap"><b class="bad">passes through zero legitimately</b> between “last map done” and “its merge created”
+    — result ships with unmerged partials. Redelivery adds double-decrements. Both fail <em>silently</em>.</div>
+  </div>
+  <p class="why">Every safe-counter patch ends up consulting task state — at which point the counter is a
+  cached copy of the truth, wired to the trigger. Demoted to the progress bar only.</p>
+</div>
+
+<div class="alt">
+  <h3>Polling watcher <span class="v rj">REJECTED</span><span class="v df">KEPT AS SMOKE ALARM</span></h3>
+  <div class="diag">
+    <svg viewBox="0 0 300 60" role="img" aria-label="poll ticks with completion between them">
+      <line x1="10" y1="30" x2="290" y2="30" stroke="var(--baseline)"/>
+      <g stroke="var(--ink-2)"><line x1="40" y1="22" x2="40" y2="38"/><line x1="120" y1="22" x2="120" y2="38"/><line x1="200" y1="22" x2="200" y2="38"/><line x1="280" y1="22" x2="280" y2="38"/></g>
+      <circle cx="150" cy="30" r="5" fill="var(--chosen-ink)"/>
+      <text x="150" y="18" font-size="8.5" text-anchor="middle" fill="var(--chosen-ink)">job actually done</text>
+      <rect x="150" y="40" width="50" height="8" fill="color-mix(in srgb, var(--s-crit) 40%, transparent)"/>
+      <text x="175" y="58" font-size="8.5" text-anchor="middle" fill="var(--s-crit)">dead wait until next poll</text>
+    </svg>
+  </div>
+  <p class="why">Adds up to a poll interval of delay at the most visible moment, plus a process that needs
+  its own health checks and single-instance election — to rediscover a fact the commit already knew.</p>
+</div>
+
+<div class="alt">
+  <h3>“Queue is empty” <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div class="flow">
+      <span class="box">queue: <span style="color:var(--muted)">∅ empty</span></span>
+      <span class="arr bad">≠ done —</span>
+      <span class="box hot">worker still holds the last task</span>
+    </div>
+    <div class="cap">and with concurrent jobs sharing the queue, “empty” says nothing about <em>your</em> job — and names no result</div>
+  </div>
+  <p class="why">Racy alone, meaningless under multi-job concurrency, and even when true you still must
+  find the answer — i.e., run the real check.</p>
+</div>
+
+<div class="alt chosen">
+  <h3>Conservation proof — count = F <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <svg viewBox="0 0 300 96" role="img" aria-label="counts merging to F">
+      <g font-size="10" text-anchor="middle">
+        <rect x="16" y="12" width="56" height="24" rx="6" fill="var(--surface)" stroke="var(--c-map)"/><text x="44" y="28" fill="var(--ink)">Σ, 5</text>
+        <rect x="86" y="12" width="56" height="24" rx="6" fill="var(--surface)" stroke="var(--c-map)"/><text x="114" y="28" fill="var(--ink)">Σ, 5</text>
+        <rect x="156" y="12" width="56" height="24" rx="6" fill="var(--surface)" stroke="var(--c-map)"/><text x="184" y="28" fill="var(--ink)">Σ, 2</text>
+      </g>
+      <g stroke="var(--baseline)"><line x1="44" y1="36" x2="106" y2="60"/><line x1="114" y1="36" x2="114" y2="60"/><line x1="184" y1="36" x2="122" y2="60"/></g>
+      <rect x="70" y="60" width="90" height="26" rx="7" fill="var(--chosen-bg)" stroke="var(--chosen-ink)" stroke-width="1.5"/>
+      <text x="115" y="77" font-size="11" text-anchor="middle" fill="var(--chosen-ink)" font-weight="bold">Σ, 12 = F ✓</text>
+      <text x="230" y="66" font-size="9" fill="var(--ink-2)">counts are conserved:</text>
+      <text x="230" y="78" font-size="9" fill="var(--ink-2)">the object IS the proof —</text>
+      <text x="230" y="90" font-size="9" fill="var(--ink-2)">can’t fire early, can’t be missed</text>
+    </svg>
+  </div>
+  <p class="why">Maps create counts, merges add them, consumption is exactly-once — so unmerged partials
+  always partition the F files. Checking a fact twice is harmless; ticking a counter twice is corruption.
+  Acting on it is a one-row CAS, so exactly one finalize ever exists.</p>
+</div>
+
+</div>
+</section>
+
+<!-- ============================== DM-004 ============================== -->
+<section class="dm" id="dm004">
+<h2><span class="id">DM-004</span>Which queue technology?</h2>
+<p class="sub">The pairing step must atomically {mark ≤5 partials consumed + enqueue their merger}.
+That single requirement decides the technology.</p>
+<div class="alts">
+
+<div class="alt">
+  <h3>External broker, order A: commit → send <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div class="flow">
+      <span class="box">DB: partials consumed ✓</span>
+      <span class="arr">①</span>
+      <span class="arr bad">② ✂ crash</span>
+      <span class="box hot">broker: merge task never sent</span>
+    </div>
+    <div class="cap"><b class="bad">consumed partials, no merger, no retrigger — the job hangs silently forever</b></div>
+  </div>
+  <p class="why">The failure the other write order can’t fix either →</p>
+</div>
+
+<div class="alt">
+  <h3>External broker, order B: send → commit <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div class="flow">
+      <span class="box">broker: merge task sent ✓</span>
+      <span class="arr">①</span>
+      <span class="arr bad">② ✂ crash</span>
+      <span class="box hot">DB: partials NOT marked consumed</span>
+    </div>
+    <div class="cap"><b class="bad">the same partials get merged again — sums counted twice, mean silently wrong</b></div>
+  </div>
+  <p class="why">The standard fix — a transactional outbox — is a DB-backed queue you then also pay a
+  broker to sit in front of.</p>
+</div>
+
+<div class="alt chosen">
+  <h3>Postgres <span style="font-family:var(--mono)">SKIP LOCKED</span> — the tasks table IS the queue <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div style="border:2px solid var(--chosen-ink); border-radius:9px; padding:8px 10px; display:inline-block">
+      <div class="flow">
+        <span class="box">mark P1…P5 consumed</span><span class="arr">+</span>
+        <span class="box">INSERT merge task</span><span class="arr">+</span>
+        <span class="box">check count = F</span>
+      </div>
+      <div class="cap" style="color:var(--chosen-ink)">ONE transaction — commits whole or not at all</div>
+    </div>
+    <div class="cap">load honesty: ~25k tasks/job at seconds each ⇒ ≪1k claims/s, against a pattern comfortable to ~1–10k/s.
+    Leases are a column; fairness is an ORDER BY.</div>
+  </div>
+  <p class="why">The dual-write class of bug is unrepresentable — state and queue share the commit.</p>
+</div>
+
+<div class="alt">
+  <h3>SQS / managed broker <span class="v df">DEFERRED — triggers written</span></h3>
+  <div class="diag">
+    <div class="rule">switch when: sustained &gt; 5k tasks/s · cross-region consumers · multi-service fan-out
+    → SQS behind the QueueAdapter seam, + transactional outbox</div>
+    <div class="cap">respected, not dismissed: managed, unbounded, built-in DLQs — just not what this correctness spine needs</div>
+  </div>
+  <p class="why">Also structurally: an 8 MB partial exceeds its 256 KB message cap 32× — the queue could
+  never carry data here anyway (see DM-005).</p>
+</div>
+
+</div>
+</section>
+
+<!-- ============================== DM-005 ============================== -->
+<section class="dm" id="dm005">
+<h2><span class="id">DM-005</span>Where do the bytes live, and in what format?</h2>
+<div class="alts compact">
+<div class="alt chosen">
+  <h3>Coat-check: queue carries tickets, store carries bytes <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div class="flow">
+      <span class="box">queue msg: <span style="font-family:var(--mono)">s3://…/M1.f64</span> (&lt;1 KB)</span>
+      <span class="arr">↔</span>
+      <span class="box">object store: 8 MB partials, 800 GB inputs</span>
+    </div>
+    <div class="cap"><b class="bad">8 MB into a 256 KB message = 32× over</b> — references or nothing.
+    Control plane : data plane ≈ 1 : 50,000 by bytes.</div>
+  </div>
+  <p class="why">MinIO locally, S3 in the cloud — same code path. Node-owned inputs are read-only behind an allow-list.</p>
+</div>
+<div class="alt">
+  <h3>Format: raw float64 vs CSV</h3>
+  <div class="diag">
+    <div class="bars">
+      <div class="b"><i style="width:38%; background:var(--accent)"></i>.f64 — 8 MB, zero parsing (both languages read it directly) <b style="color:var(--chosen-ink)">✓ intermediates</b></div>
+      <div class="b"><i style="width:95%; background:var(--baseline)"></i>CSV — ~20 MB (2.5×) + parse cost <b style="color:var(--ink-2)">kept for inputs &amp; the human-readable result</b></div>
+    </div>
+  </div>
+  <p class="why">No human ever reads an intermediate file — don’t pay text costs on 200 GB of them.</p>
+</div>
+<div class="alt">
+  <h3>Result delivery <span class="v ch">302 → pre-signed URL</span></h3>
+  <div class="diag">
+    <div class="flow">
+      <span class="box">client</span><span class="arr">GET /result →</span>
+      <span class="box ok">API: 302 (15-min signed link)</span><span class="arr">→</span>
+      <span class="box">store serves the bytes</span>
+    </div>
+    <div class="cap">the API never touches result bytes — it stays a pure control plane (`?inline=1` proxies, for curl)</div>
+  </div>
+  <p class="why">Rejected: API streaming every download (20 MB bodies through the control plane), and webhooks (no authenticated callee).</p>
+</div>
+</div>
+</section>
+
+<!-- ============================== DM-006 ============================== -->
+<section class="dm" id="dm006">
+<h2><span class="id">DM-006</span>Workers crash, stall, and run tasks twice. Why is the answer still exact?</h2>
+<div class="alts compact">
+<div class="alt chosen">
+  <h3>Lease · heartbeat · deadline <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <svg viewBox="0 0 320 74" role="img" aria-label="lease timeline">
+      <line x1="10" y1="34" x2="310" y2="34" stroke="var(--baseline)"/>
+      <circle cx="24" cy="34" r="5" fill="var(--accent)"/><text x="24" y="20" font-size="8.5" text-anchor="middle" fill="var(--ink-2)">claim</text>
+      <g fill="var(--chosen-ink)"><circle cx="64" cy="34" r="3.5"/><circle cx="104" cy="34" r="3.5"/></g>
+      <text x="84" y="20" font-size="8.5" text-anchor="middle" fill="var(--ink-2)">heartbeats /10 s</text>
+      <text x="144" y="24" font-size="9" fill="var(--s-crit)">✂ crash → silence</text>
+      <rect x="130" y="30" width="80" height="8" fill="color-mix(in srgb, var(--s-crit) 35%, transparent)"/>
+      <circle cx="218" cy="34" r="5" fill="var(--s-warn)"/><text x="218" y="20" font-size="8.5" text-anchor="middle" fill="var(--ink-2)">lease dies ≤35 s</text>
+      <text x="272" y="20" font-size="8.5" text-anchor="middle" fill="var(--chosen-ink)">requeued,</text>
+      <text x="272" y="30" font-size="8.5" text-anchor="middle" fill="var(--chosen-ink)">token rotated</text>
+      <line x1="10" y1="58" x2="310" y2="58" stroke="var(--s-crit)" stroke-dasharray="5 4"/>
+      <text x="160" y="70" font-size="8.5" text-anchor="middle" fill="var(--s-crit)">absolute deadline 300 s — heartbeats cannot cross it (kills the wedged-but-alive case)</text>
+    </svg>
+  </div>
+  <p class="why">Liveness never depends on a worker’s self-report.</p>
+</div>
+<div class="alt chosen">
+  <h3>Retries made harmless, not impossible <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div class="flow" style="margin-bottom:6px">
+      <span class="box">retry writes <span style="font-family:var(--mono)">…/M1.f64</span> again</span>
+      <span class="arr" style="color:var(--chosen-ink)">→ identical bytes, same name: overwrites itself ✓</span>
+    </div>
+    <div class="flow">
+      <span class="box hot">zombie’s late commit (old token)</span>
+      <span class="arr bad">→ WHERE lease_token = mine … 0 rows → discarded</span>
+    </div>
+    <div class="cap">plus: at most one partial per task (unique), and a merge’s inputs are frozen at its creation</div>
+  </div>
+  <p class="why">Exactly-once across a queue and an object store doesn’t exist; at-least-once + idempotent
+  effects is outcome-equivalent — and buildable.</p>
+</div>
+<div class="alt">
+  <h3>Rejected shapes</h3>
+  <div class="diag">
+    <div class="bars">
+      <div class="b"><b style="color:var(--s-crit)">✗</b>&nbsp;at-most-once — silently loses crashed work</div>
+      <div class="b"><b style="color:var(--s-crit)">✗</b>&nbsp;two-phase commit / “exactly-once” — can’t cover the object store; pays latency chasing a myth</div>
+      <div class="b"><b style="color:var(--s-crit)">✗</b>&nbsp;ZooKeeper/etcd membership — a second stateful system for what a column does</div>
+    </div>
+  </div>
+  <p class="why">Failure handling here is columns and conditions inside transactions that already exist.</p>
+</div>
+</div>
+</section>
+
+<!-- ============================== DM-007 ============================== -->
+<section class="dm" id="dm007">
+<h2><span class="id">DM-007</span>A big job is running and a small one arrives. Who gets the workers?</h2>
+<div class="alts compact">
+<div class="alt">
+  <h3>Strict FIFO <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div class="qs">
+      <span class="tk j1">J1</span><span class="tk j1">J1</span><span class="tk j1">J1</span><span class="tk j1">J1</span>
+      <span class="tk j1">J1</span><span class="tk j1">…×25,000</span>
+      <span class="tk j2">J2</span><span class="tk j2">J2</span><span class="tk j2">J2</span>
+    </div>
+    <div class="cap"><b class="bad">the 3-task job waits hours for ~15 s of work</b> — and adding workers speeds the convoy, never reorders it</div>
+  </div>
+  <p class="why">Head-of-line blocking is a policy failure, not a capacity failure.</p>
+</div>
+<div class="alt chosen">
+  <h3>Least-served job first (one ORDER BY) <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div class="qs">
+      <span class="tk j2">J2</span><span class="tk j1">J1</span><span class="tk j2">J2</span><span class="tk j1">J1</span>
+      <span class="tk j2">J2</span><span class="tk j1">J1</span><span class="tk j1">J1</span>
+    </div>
+    <div class="rule">claim ORDER BY (job’s in-flight count ASC, priority ASC, age) — finalize=0 &lt; reduce=1 &lt; map=2</div>
+    <div class="cap"><b class="good">small job finishes in ~its own work time; the big job loses ~0.01%</b></div>
+  </div>
+  <p class="why">Possible only because the queue is a table (DM-004). Rejected alongside: per-job queues +
+  a dispatcher component (moving parts for what one clause does); weighted fair queuing (deferred — no tenants yet).</p>
+</div>
+</div>
+</section>
+
+<!-- ============================== DM-008 ============================== -->
+<section class="dm" id="dm008">
+<h2><span class="id">DM-008</span>How is the worker count W controlled through the API?</h2>
+<div class="alts compact">
+<div class="alt chosen">
+  <h3>Thermostat: desired-state + reconciler <span class="v ch">CHOSEN</span></h3>
+  <div class="diag">
+    <div class="flow">
+      <span class="box">API writes <span style="font-family:var(--mono)">desired: 8</span></span>
+      <span class="arr">→</span>
+      <span class="box ok">supervisor loop: compare &amp; converge</span>
+      <span class="arr">→</span>
+      <span class="box">start/stop workers (compose locally, ECS in cloud — same loop)</span>
+    </div>
+    <div class="cap">scale-down is polite (finish task → exit) but never load-bearing — the lease is the backstop</div>
+  </div>
+  <p class="why">One process per worker: a fault costs one lease, and W stays a single number.</p>
+</div>
+<div class="alt">
+  <h3>Rejected shapes</h3>
+  <div class="diag">
+    <div class="bars">
+      <div class="b"><b style="color:var(--s-crit)">✗</b>&nbsp;API spawns processes itself — the control plane becomes a stateful babysitter</div>
+      <div class="b"><b style="color:var(--s-crit)">✗</b>&nbsp;workers manage their own population — who starts the first one? who wins a scale-down race?</div>
+      <div class="b"><b style="color:var(--s-warn)">◌</b>&nbsp;queue-depth autoscaling — DEFERRED: the requirement is <em>user-set</em> W</div>
+    </div>
+  </div>
+  <p class="why">Same pattern as everything else: write the wish somewhere durable; let a loop make it true.</p>
+</div>
+</div>
+</section>
+
+<!-- ============================== DM-009 ============================== -->
+<section class="dm" id="dm009">
+<h2><span class="id">DM-009</span>How do you watch the system live — honestly?</h2>
+<div class="alts compact">
+<div class="alt">
+  <h3>Progress = done ÷ total tasks <span class="v rj">REJECTED</span></h3>
+  <div class="diag">
+    <div class="bars">
+      <div class="b"><i style="width:62%; background:var(--accent)"></i>62%</div>
+      <div class="b"><i style="width:57%; background:linear-gradient(90deg, var(--accent) 92%, var(--s-crit) 92%)"></i>57% <b style="color:var(--s-crit)">← went BACKWARDS: a merge task was just created</b></div>
+    </div>
+  </div>
+  <p class="why">The denominator grows mid-run — the bar visibly regresses. Users forgive slow; they never forgive backwards.</p>
+</div>
+<div class="alt chosen">
+  <h3>Progress = files covered <span class="v ch">CHOSEN</span> · events over SSE</h3>
+  <div class="diag">
+    <div class="bars">
+      <div class="b"><i style="width:56%; background:var(--accent)"></i>56%</div>
+      <div class="b"><i style="width:78%; background:var(--accent)"></i>78%</div>
+      <div class="b"><i style="width:99%; background:var(--accent)"></i>99% — clamped; <b style="color:var(--chosen-ink)">only the finalize writes 100%</b></div>
+    </div>
+    <div class="cap">computed from partial rows (state, monotone by construction). Stream: append-only events over SSE,
+    tail reads <b>1 s behind commit</b> — ids are assigned in order but become visible in commit order; the lag is the no-skip guarantee.</div>
+  </div>
+  <p class="why">WebSockets rejected (one-way flow needs no duplex; SSE auto-resumes via Last-Event-ID);
+  polling kept as fallback; the two alert-worthy gauges: oldest-pending and oldest-claimed task age.</p>
+</div>
+</div>
+</section>
+
+<!-- ============================== DM-010 ============================== -->
+<section class="dm" id="dm010">
+<h2><span class="id">DM-010</span>Did distributing the sum cost any accuracy?</h2>
+<div class="alts compact">
+<div class="alt chosen">
+  <h3>Worst-case rounding error at F = 100,000 <span class="v ch">float64 + tree</span></h3>
+  <div class="diag">
+    <div class="bars">
+      <div class="b"><i style="width:92%; background:color-mix(in srgb, var(--s-crit) 55%, var(--surface))"></i>naive serial loop ≈ 1.1e-11</div>
+      <div class="b"><i style="width:9%; background:var(--chosen-ink)"></i>our 5-ary tree ≈ 8.9e-16</div>
+      <div class="b"><i style="width:9%; background:var(--chosen-ink)"></i>numpy (pairwise) ≈ same</div>
+    </div>
+    <div class="cap">log scale in spirit: ~10,000× apart. The tree IS pairwise summation — the accuracy is free, a
+    side-effect of the shape the RAM constraint forced.</div>
+  </div>
+  <p class="why">The honest claim: distribution is accuracy-<em>neutral</em> versus a good single-node
+  implementation; only a hand-written naive loop loses. Kahan compensation: DEFERRED — doubles partial
+  size to win a digit these bounds don’t need. Values ∈ float64 with 2⁵³ headroom — no overflow.</p>
+</div>
+</div>
+</section>
+
+<!-- ============================== DM-011 ============================== -->
+<section class="dm" id="dm011">
+<h2><span class="id">DM-011</span>Why build this at all, instead of adopting an engine?</h2>
+<div class="alts compact">
+<div class="alt">
+  <h3>Spark / Dask <span class="v rj">REJECTED HERE</span></h3>
+  <div class="diag"><div class="cap">computes this in ~6 lines (<span style="font-family:var(--mono)">treeAggregate</span>) — but erases the
+  deliverable (the orchestration algorithm itself), and assumes homogeneous, co-scheduled executors — the
+  assumption this problem withdraws. <b class="good">Absent these constraints, it wins — said openly.</b></div></div>
+  <p class="why">Right tool, wrong constraints.</p>
+</div>
+<div class="alt">
+  <h3>Temporal / Step Functions <span class="v rj">REJECTED</span></h3>
+  <div class="diag"><div class="cap">~25k activities per job strains history-per-workflow models, and the
+  load-bearing invariant (consume-partials + enqueue-merger, atomically) lives outside their transaction
+  boundary — you’d still need the Postgres transaction, now coordinated with a second stateful system.</div></div>
+  <p class="why">The dual-write DM-004 exists to kill, reintroduced at the platform level.</p>
+</div>
+<div class="alt">
+  <h3>Celery / RQ / Ray <span class="v rj">REJECTED</span></h3>
+  <div class="diag"><div class="cap">chord-style fan-in is the counter design DM-003 rejects; broker↔DB is
+  the dual write again; a TypeScript producer is a second-class citizen in the protocol.</div></div>
+  <p class="why">Inherits both core objections at once.</p>
+</div>
+<div class="alt chosen">
+  <h3>Build on primitives <span class="v ch">CHOSEN</span></h3>
+  <div class="diag"><div class="cap">the components are fixed (Node API · DB · any queue · Python workers)
+  and every distinctive mechanism here — the eager tree, the count-proof, fairness-as-ORDER-BY — exists
+  <em>because</em> the state and the queue share one transaction. Five containers; smaller than any engine’s control plane.</div></div>
+  <p class="why">The honest cost is owning the failure modes — priced in DM-006.</p>
+</div>
+</div>
+</section>
+
+</main>
+
+<footer>
+  Distributed Mean · Decision Atlas — static companion to the <a href="simulator.html">simulator</a> and the
+  <a href="dashboard.html">live dashboard</a>. Sources: <span style="font-family:var(--mono)">docs/itds/DM-001…DM-011</span>,
+  <span style="font-family:var(--mono)">docs/04-decision-journey.md</span>.
+</footer>
+
+</body>
+</html>

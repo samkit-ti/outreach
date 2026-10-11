@@ -47,6 +47,7 @@ td.co .role{color:var(--fg)}
 .pill.ver{background:var(--good-soft);color:var(--good);border-color:transparent}
 .pill.unv{background:var(--warn-soft);color:var(--warn);border-color:transparent}
 .pill.co{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.pill.closed{background:var(--bad-soft,rgba(180,40,40,.12));color:var(--bad);border-color:transparent}
 .conf-high{color:var(--good)}.conf-med{color:var(--warn)}.conf-low{color:var(--muted)}
 .comp{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
 .comp small{display:block;font-family:var(--sans);color:var(--muted);font-size:11.5px}
@@ -57,6 +58,7 @@ tr.detail dt{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:
 tr.detail dd{margin:0}
 .track{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--fg);padding:3px 6px}
 .track.applied{border-color:var(--accent)}.track.interviewing{border-color:var(--good)}.track.rejected,.track.skip{opacity:.6}
+.pill.new{background:var(--accent);color:var(--bg);border-color:var(--accent);margin-left:6px;font-size:10px}
 .empty{padding:28px;text-align:center;color:var(--muted)}
 footer{margin-top:16px;color:var(--muted);font-size:12px;max-width:70ch}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -66,15 +68,16 @@ footer{margin-top:16px;color:var(--muted);font-size:12px;max-width:70ch}
 <div class="wrap">
 <header>
   <div><h1>Switch Board</h1><div class="sub">Openings matched to Samkit Shah's resume · 2–3 YOE · India ≥ ₹50L fixed, abroad ≥ $150k base · compiled __DATE__</div></div>
-  <div class="sub"><span id="total">__TOTAL__</span> rows · <span id="ver">__VERIFIED__</span> verified live on __DATE__</div>
+  <div class="sub"><span id="total">__TOTAL__</span> rows · <span id="ver">__VERIFIED__</span> verified live on __DATE__ · <span id="newn">__NEW__</span> added in sweep 2</div>
 </header>
 
 <div class="strip" id="strip"></div>
 
 <div class="rail">
   <label>Mode <select id="fMode"><option value="">any</option></select></label>
-  <label>Status <select id="fStatus"><option value="">any</option><option value="verified">verified open</option><option value="search">unverified</option><option value="company">company hiring</option></select></label>
+  <label>Status <select id="fStatus"><option value="">any</option><option value="verified">verified open</option><option value="search">unverified</option><option value="company">company hiring</option><option value="closed">closed since posting</option></select></label>
   <label>Min fit <select id="fFit"><option value="0">any</option><option value="3">3+</option><option value="4">4+</option><option value="5">5</option></select></label>
+  <label>Added <select id="fNew"><option value="">any</option><option value="2">new in sweep 2</option><option value="1">original sweep</option></select></label>
   <label>My tracking <select id="fTrack"><option value="">any</option><option value="none">not applied</option><option value="applied">applied</option><option value="interviewing">interviewing</option><option value="rejected">rejected</option><option value="skip">skipped</option></select></label>
   <input type="search" id="q" placeholder="search company, role, notes, visa…" aria-label="Search">
   <span class="count" id="count"></span>
@@ -134,16 +137,17 @@ for (const [k, label] of Object.entries(BUCKETS)) {
 });
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const statusPill = s => s.startsWith("verified") ? `<span class="pill ver">verified open</span>`
+const statusPill = s => s.startsWith("closed") ? `<span class="pill closed">closed</span>` : s.startsWith("verified") ? `<span class="pill ver">verified open</span>`
   : s.startsWith("company") ? `<span class="pill co">company hiring</span>` : `<span class="pill unv">unverified</span>`;
 const fitStars = n => "●".repeat(n) + "○".repeat(Math.max(0, 5 - n));
 
 function filtered() {
   const q = $("#q").value.trim().toLowerCase();
-  const mode = $("#fMode").value, st = $("#fStatus").value, minFit = +$("#fFit").value, tr = $("#fTrack").value;
+  const mode = $("#fMode").value, st = $("#fStatus").value, minFit = +$("#fFit").value, tr = $("#fTrack").value, nw = $("#fNew").value;
   return DATA.filter(r => {
     if (bucketF && r.bucket !== bucketF) return false;
     if (mode && r.work_mode !== mode) return false;
+    if (nw && String(r.sweep || 1) !== nw) return false;
     if (st && !r.status.startsWith(st)) return false;
     if (r.fit_score < minFit) return false;
     const t = track[rid(r)] || "none";
@@ -175,7 +179,7 @@ function render() {
     const tr = document.createElement("tr"); tr.className = "row"; tr.tabIndex = 0;
     tr.innerHTML = `
       <td class="fit" title="fit ${r.fit_score}/5">${fitStars(r.fit_score)}</td>
-      <td class="co"><b>${esc(r.company)}</b>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener" class="role">${esc(r.role)} ↗</a>` : `<span class="role">${esc(r.role)}</span>`}</td>
+      <td class="co"><b>${esc(r.company)}</b>${r.sweep === 2 ? `<span class="pill new">new</span>` : ""}${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener" class="role">${esc(r.role)} ↗</a>` : `<span class="role">${esc(r.role)}</span>`}</td>
       <td><span class="pill">${esc(BUCKETS[r.bucket] || r.bucket)}</span></td>
       <td class="mode">${esc(r.location)}<br><span class="sub">${esc(r.work_mode)}</span></td>
       <td>${esc(r.yoe_required)}</td>
@@ -206,7 +210,7 @@ document.querySelectorAll("thead th[data-k]").forEach(th => th.addEventListener(
   if (sortK === k) sortDir = -sortDir; else { sortK = k; sortDir = k === "fit_score" ? -1 : 1; }
   render();
 }));
-["#fMode","#fStatus","#fFit","#fTrack"].forEach(s => $(s).addEventListener("change", render));
+["#fMode","#fStatus","#fFit","#fTrack","#fNew"].forEach(s => $(s).addEventListener("change", render));
 $("#q").addEventListener("input", render);
 render();
 </script>

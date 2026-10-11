@@ -1,0 +1,212 @@
+<title>Switch Board</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one column, summary strip → filter rail → dense sortable table; row expands to show fit notes. */
+:root{
+  --bg:#f6f7fa; --surface:#ffffff; --fg:#141a26; --muted:#5b6578; --line:#dfe3ea;
+  --accent:#0b6e78; --accent-soft:#d9eef0; --warn:#b26a00; --warn-soft:#fff1d6; --bad:#a33a3a; --bad-soft:#fbe3e3; --good:#1f7a3a; --good-soft:#e0f3e6;
+  --sans:"Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f131a; --surface:#171c25; --fg:#e7eaf0; --muted:#98a2b3; --line:#2a3140;
+  --accent:#4fc1c9; --accent-soft:#143236; --warn:#f0b24a; --warn-soft:#3a2c10; --bad:#f08a8a; --bad-soft:#3b1c1c; --good:#6ad08a; --good-soft:#15301d; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f131a; --surface:#171c25; --fg:#e7eaf0; --muted:#98a2b3; --line:#2a3140;
+  --accent:#4fc1c9; --accent-soft:#143236; --warn:#f0b24a; --warn-soft:#3a2c10; --bad:#f08a8a; --bad-soft:#3b1c1c; --good:#6ad08a; --good-soft:#15301d; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;line-height:1.45;padding-inline:16px;padding-block:20px 48px;margin:0}
+.wrap{max-width:1280px;margin:0 auto}
+header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px 24px;margin-bottom:18px}
+h1{font-size:26px;margin:0;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--muted);font-size:13px}
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.tile[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}
+.tile .n{font-family:var(--mono);font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.tile .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.rail{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:12px}
+.rail label{font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+select,input[type=search]{font:inherit;font-size:13px;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+input[type=search]{min-width:200px}
+.count{margin-left:auto;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.tablewrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;min-width:980px}
+th,td{padding:9px 10px;text-align:left;vertical-align:top;border-top:1px solid var(--line)}
+thead th{border-top:0;font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap;position:sticky;top:env(safe-area-inset-top,0px);background:var(--surface);z-index:1}
+thead th[aria-sort]::after{content:" ↕";opacity:.5}
+thead th[aria-sort="ascending"]::after{content:" ↑";opacity:1}
+thead th[aria-sort="descending"]::after{content:" ↓";opacity:1}
+tr.row{cursor:pointer}
+tr.row:hover td{background:color-mix(in srgb,var(--accent-soft) 40%,transparent)}
+td.co b{display:block;font-weight:600}
+td.co a{color:var(--accent);text-decoration:none}
+td.co a:hover{text-decoration:underline}
+td.co .role{color:var(--fg)}
+.fit{font-family:var(--mono);font-weight:600;letter-spacing:.1em;white-space:nowrap}
+.pill{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);background:var(--bg);white-space:nowrap}
+.pill.ver{background:var(--good-soft);color:var(--good);border-color:transparent}
+.pill.unv{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.pill.co{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.conf-high{color:var(--good)}.conf-med{color:var(--warn)}.conf-low{color:var(--muted)}
+.comp{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.comp small{display:block;font-family:var(--sans);color:var(--muted);font-size:11.5px}
+td.mode{white-space:nowrap}
+tr.detail td{background:var(--bg);padding:10px 14px 14px 46px;font-size:13px}
+tr.detail .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px 24px}
+tr.detail dt{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
+tr.detail dd{margin:0}
+.track{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--fg);padding:3px 6px}
+.track.applied{border-color:var(--accent)}.track.interviewing{border-color:var(--good)}.track.rejected,.track.skip{opacity:.6}
+.empty{padding:28px;text-align:center;color:var(--muted)}
+footer{margin-top:16px;color:var(--muted);font-size:12px;max-width:70ch}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion:no-preference){tr.row td{transition:background .12s}}
+@media (max-width:640px){h1{font-size:22px}}
+</style>
+<div class="wrap">
+<header>
+  <div><h1>Switch Board</h1><div class="sub">Openings matched to Samkit Shah's resume · 2–3 YOE · India ≥ ₹50L fixed, abroad ≥ $150k base · compiled __DATE__</div></div>
+  <div class="sub"><span id="total">__TOTAL__</span> rows · <span id="ver">__VERIFIED__</span> verified live on __DATE__</div>
+</header>
+
+<div class="strip" id="strip"></div>
+
+<div class="rail">
+  <label>Mode <select id="fMode"><option value="">any</option></select></label>
+  <label>Status <select id="fStatus"><option value="">any</option><option value="verified">verified open</option><option value="search">unverified</option><option value="company">company hiring</option></select></label>
+  <label>Min fit <select id="fFit"><option value="0">any</option><option value="3">3+</option><option value="4">4+</option><option value="5">5</option></select></label>
+  <label>My tracking <select id="fTrack"><option value="">any</option><option value="none">not applied</option><option value="applied">applied</option><option value="interviewing">interviewing</option><option value="rejected">rejected</option><option value="skip">skipped</option></select></label>
+  <input type="search" id="q" placeholder="search company, role, notes, visa…" aria-label="Search">
+  <span class="count" id="count"></span>
+</div>
+
+<div class="tablewrap">
+<table id="t">
+<thead><tr>
+  <th data-k="fit_score" aria-sort="descending">Fit</th>
+  <th data-k="company">Company / role</th>
+  <th data-k="bucket">Bucket</th>
+  <th data-k="location">Location · mode</th>
+  <th data-k="yoe_required">YOE</th>
+  <th data-k="comp_estimate">Comp (fixed / base)</th>
+  <th data-k="visa_path">Visa path</th>
+  <th data-k="status">Status</th>
+  <th>Track</th>
+</tr></thead>
+<tbody id="tb"></tbody>
+</table>
+</div>
+<footer>Comp figures are posted bands where available, otherwise levels.fyi / Glassdoor / AmbitionBox estimates for the matching level. "Verified" means the posting URL loaded on __DATE__ and matched the role. Tracking choices are saved only in this browser. Click a row for fit notes and caveats.</footer>
+</div>
+
+<script>
+const DATA = /*__DATA__*/;
+const BUCKETS = /*__BUCKETS__*/;
+const $ = s => document.querySelector(s);
+let sortK = "fit_score", sortDir = -1, bucketF = "";
+
+// per-viewer tracking (localStorage, best-effort)
+const TKEY = "switchboard.track.v1";
+let track = {};
+try { track = JSON.parse(localStorage.getItem(TKEY) || "{}") || {}; } catch (e) { track = {}; }
+const saveTrack = () => { try { localStorage.setItem(TKEY, JSON.stringify(track)); } catch (e) {} };
+const rid = r => (r.url || (r.company + "|" + r.role)).toLowerCase();
+
+// summary tiles
+const strip = $("#strip");
+const allTile = document.createElement("button");
+allTile.className = "tile"; allTile.setAttribute("aria-pressed","true");
+allTile.innerHTML = `<div class="n">${DATA.length}</div><div class="l">All buckets</div>`;
+allTile.onclick = () => { bucketF = ""; render(); };
+strip.appendChild(allTile);
+for (const [k, label] of Object.entries(BUCKETS)) {
+  const n = DATA.filter(r => r.bucket === k).length;
+  if (!n) continue;
+  const b = document.createElement("button");
+  b.className = "tile"; b.dataset.b = k; b.setAttribute("aria-pressed","false");
+  b.innerHTML = `<div class="n">${n}</div><div class="l">${label}</div>`;
+  b.onclick = () => { bucketF = bucketF === k ? "" : k; render(); };
+  strip.appendChild(b);
+}
+// mode options
+[...new Set(DATA.map(r => r.work_mode).filter(Boolean))].sort().forEach(m => {
+  const o = document.createElement("option"); o.value = m; o.textContent = m; $("#fMode").appendChild(o);
+});
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const statusPill = s => s.startsWith("verified") ? `<span class="pill ver">verified open</span>`
+  : s.startsWith("company") ? `<span class="pill co">company hiring</span>` : `<span class="pill unv">unverified</span>`;
+const fitStars = n => "●".repeat(n) + "○".repeat(Math.max(0, 5 - n));
+
+function filtered() {
+  const q = $("#q").value.trim().toLowerCase();
+  const mode = $("#fMode").value, st = $("#fStatus").value, minFit = +$("#fFit").value, tr = $("#fTrack").value;
+  return DATA.filter(r => {
+    if (bucketF && r.bucket !== bucketF) return false;
+    if (mode && r.work_mode !== mode) return false;
+    if (st && !r.status.startsWith(st)) return false;
+    if (r.fit_score < minFit) return false;
+    const t = track[rid(r)] || "none";
+    if (tr && t !== tr) return false;
+    if (q) {
+      const hay = [r.company, r.role, r.location, r.fit_notes, r.notes, r.visa_path, r.comp_estimate, BUCKETS[r.bucket]].join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  }).sort((a, b) => {
+    let x = a[sortK], y = b[sortK];
+    if (typeof x === "number" && typeof y === "number") return (x - y) * sortDir;
+    return String(x ?? "").localeCompare(String(y ?? "")) * sortDir;
+  });
+}
+
+function render() {
+  document.querySelectorAll(".tile").forEach(t => t.setAttribute("aria-pressed", String((t.dataset.b || "") === bucketF)));
+  document.querySelectorAll("thead th[data-k]").forEach(th => {
+    if (th.dataset.k === sortK) th.setAttribute("aria-sort", sortDir < 0 ? "descending" : "ascending");
+    else th.setAttribute("aria-sort", "none");
+  });
+  const rows = filtered();
+  $("#count").textContent = `${rows.length} of ${DATA.length} shown`;
+  const tb = $("#tb"); tb.innerHTML = "";
+  if (!rows.length) { tb.innerHTML = `<tr><td colspan="9" class="empty">No rows match these filters.</td></tr>`; return; }
+  for (const r of rows) {
+    const id = rid(r), t = track[id] || "none";
+    const tr = document.createElement("tr"); tr.className = "row"; tr.tabIndex = 0;
+    tr.innerHTML = `
+      <td class="fit" title="fit ${r.fit_score}/5">${fitStars(r.fit_score)}</td>
+      <td class="co"><b>${esc(r.company)}</b>${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener" class="role">${esc(r.role)} ↗</a>` : `<span class="role">${esc(r.role)}</span>`}</td>
+      <td><span class="pill">${esc(BUCKETS[r.bucket] || r.bucket)}</span></td>
+      <td class="mode">${esc(r.location)}<br><span class="sub">${esc(r.work_mode)}</span></td>
+      <td>${esc(r.yoe_required)}</td>
+      <td class="comp">${esc(r.comp_estimate || "unknown")}<small class="conf-${esc(r.comp_confidence || "low")}">${esc(r.comp_confidence || "low")} confidence${r.comp_source ? " · " + esc(r.comp_source) : ""}</small></td>
+      <td>${esc(r.visa_path) || "<span class='sub'>—</span>"}</td>
+      <td>${statusPill(r.status)}</td>
+      <td><select class="track ${t}" id="trk-${esc(id).replace(/[^a-z0-9]/g,"_").slice(0,80)}" aria-label="Tracking status">
+        ${["none","applied","interviewing","rejected","skip"].map(v => `<option value="${v}" ${v===t?"selected":""}>${v==="none"?"not applied":v}</option>`).join("")}
+      </select></td>`;
+    const det = document.createElement("tr"); det.className = "detail"; det.hidden = true;
+    det.innerHTML = `<td colspan="9"><dl class="grid">
+      <div><dt>Why it fits</dt><dd>${esc(r.fit_notes) || "—"}</dd></div>
+      <div><dt>Notes / caveats</dt><dd>${esc(r.notes) || "—"}</dd></div>
+      <div><dt>Comp source</dt><dd>${esc(r.comp_source) || "—"}</dd></div>
+      ${r.url ? `<div><dt>Link</dt><dd><a href="${esc(r.url)}" target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all">${esc(r.url)}</a></dd></div>` : ""}
+    </dl></td>`;
+    tr.addEventListener("click", e => { if (e.target.closest("a,select")) return; det.hidden = !det.hidden; });
+    tr.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); det.hidden = !det.hidden; } });
+    tr.querySelector("select.track").addEventListener("change", e => {
+      const v = e.target.value; if (v === "none") delete track[id]; else track[id] = v; saveTrack();
+      e.target.className = "track " + v;
+    });
+    tb.appendChild(tr); tb.appendChild(det);
+  }
+}
+document.querySelectorAll("thead th[data-k]").forEach(th => th.addEventListener("click", () => {
+  const k = th.dataset.k;
+  if (sortK === k) sortDir = -sortDir; else { sortK = k; sortDir = k === "fit_score" ? -1 : 1; }
+  render();
+}));
+["#fMode","#fStatus","#fFit","#fTrack"].forEach(s => $(s).addEventListener("change", render));
+$("#q").addEventListener("input", render);
+render();
+</script>
